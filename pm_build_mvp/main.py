@@ -34,16 +34,16 @@ Platform: Web for now, maybe Mobile later."""
         print(f"Created initial template: {raw_ideas_path}")
 
 if __name__ == "__main__":
-    print("Initializing PM CrewAI System (Hierarchical Mode)...")
+    print("Initializing PM Planning System (Phase-based Mode)...")
     init_workspace()
-    
+
     ok, env_errors = validate_llm_env()
     if not ok:
         print("LLM environment check failed:")
         for e in env_errors:
             print(f"- {e}")
         raise SystemExit(1)
-        
+
     print("Starting Planning Workflow...")
     output = run_planning()
     print("Workflow finished.")
@@ -51,5 +51,6 @@ if __name__ == "__main__":
         f"Result => ok={output.get('ok')} "
         f"risk={output.get('risk')} "
         f"attempts={output.get('attempts')} "
-        f"errors={len(output.get('errors'))},"
+        f"errors={len(output.get('errors', []))} "
+        f"risk_reasons={len(output.get('risk_reasons', []))},"
     )
