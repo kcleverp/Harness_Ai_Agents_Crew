@@ -109,6 +109,91 @@ _CHECKPOINT_REQUIRED_KEYS = frozenset({
     "open_questions", "recommended_direction",
 })
 
+_DECISION_SYSTEM = """\
+You are a senior product architect making definitive MVP decisions.
+
+Given a concept checkpoint, produce a blueprint document.
+
+Output format:
+1. Write the blueprint in Markdown with EXACTLY these headings (no others):
+   # Product Direction
+   # MVP Boundary
+   # Core User Flow
+   # Tech Stack Decision
+   # Data / Backend Notes
+   # Rejected Options
+   # Trade-offs
+   # Risks
+   # Build Order
+
+2. After the document, append this metadata block:
+   <!-- DECISION_META
+   {"selected_decisions": ["decision1"], "trade_offs": ["tradeoff1"], "reasons": ["reason1"], "rejected_options": ["option1", "option2"], "ko_log_summary": "<1-2 sentence Korean summary of the key decisions made>"}
+   DECISION_META -->
+
+Rules:
+- Be decisive. No "TBD" or "depends on context".
+- Tech Stack Decision must name specific tools with a one-line justification each.
+- Rejected Options must list at least 2 alternatives that were considered.
+- Trade-offs must state what was sacrificed and why it was acceptable.
+- Keep document concise: 400-600 words max.\
+"""
+
+_FOUNDER_SUMMARY_SYSTEM = """\
+You are a product writer creating a concise founder-level summary.
+
+Given a blueprint, write the founder summary.
+
+Output format:
+Markdown with EXACTLY these headings (no others):
+# One-line Product
+# Who It Is For
+# Problem
+# MVP Scope
+# What Is Explicitly Out
+# Why This Scope First
+
+After the document, append:
+<!-- CREATIVE_META
+{"narrative_focus": "<what angle was emphasized>", "rejected_framings": ["framing1"], "ko_log_summary": "<1-2 sentence Korean summary>"}
+CREATIVE_META -->
+
+Rules:
+- "One-line Product": one sentence, 15 words max.
+- "MVP Scope": bullet list of 3-5 items only.
+- "What Is Explicitly Out": bullet list, each item specific and unambiguous.
+- No marketing language. Clarity over persuasion.
+- 250-350 words total.\
+"""
+
+_FEATURE_SPEC_SYSTEM = """\
+You are a senior product manager writing a feature specification.
+
+Given a blueprint and founder summary, write the feature spec.
+
+Output format:
+Markdown with EXACTLY these headings (no others):
+# Primary User Stories
+# End-to-End User Flow
+# Feature Breakdown
+# Acceptance Boundaries
+# Non-goals
+# Open Product Risks
+
+After the document, append:
+<!-- CREATIVE_META
+{"narrative_focus": "<what angle was emphasized>", "rejected_framings": ["framing1"], "ko_log_summary": "<1-2 sentence Korean summary>"}
+CREATIVE_META -->
+
+Rules:
+- "Primary User Stories": "As a [user], I want [action] so that [outcome]" format, 3-5 stories.
+- "End-to-End User Flow": numbered steps, 5-8 steps.
+- "Feature Breakdown": one sub-heading per feature, 2-3 acceptance criteria each.
+- "Non-goals": explicit list of what this spec does NOT cover.
+- No tech stack details. Product language only.
+- 400-500 words total.\
+"""
+
 
 # ---------------------------------------------------------------------------
 # Phase response helpers
@@ -146,6 +231,38 @@ def _clean_json_response(text: str) -> str:
 def _validate_checkpoint(data: dict) -> list:
     """Return list of missing required keys in concept_checkpoint."""
     return [k for k in _CHECKPOINT_REQUIRED_KEYS if k not in data]
+
+
+def _extract_decision_meta(text: str) -> dict:
+    """Extract <!-- DECISION_META {...} DECISION_META --> block."""
+    match = re.search(r'<!--\s*DECISION_META\s*(.*?)\s*DECISION_META\s*-->', text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        return {}
+
+
+def _strip_decision_meta(text: str) -> str:
+    """Remove DECISION_META block, returning clean markdown."""
+    return re.sub(r'<!--\s*DECISION_META.*?DECISION_META\s*-->', '', text, flags=re.DOTALL).strip()
+
+
+def _extract_creative_meta(text: str) -> dict:
+    """Extract <!-- CREATIVE_META {...} CREATIVE_META --> block."""
+    match = re.search(r'<!--\s*CREATIVE_META\s*(.*?)\s*CREATIVE_META\s*-->', text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        return {}
+
+
+def _strip_creative_meta(text: str) -> str:
+    """Remove CREATIVE_META block, returning clean markdown."""
+    return re.sub(r'<!--\s*CREATIVE_META.*?CREATIVE_META\s*-->', '', text, flags=re.DOTALL).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +425,135 @@ def run_synthesis() -> dict:
         )
 
     return checkpoint
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Decision
+# ---------------------------------------------------------------------------
+
+def run_decision() -> dict:
+    """Phase 3: Decision
+
+    Reads concept_checkpoint.json, produces definitive blueprint.md.
+    Uses claude-opus class model for structural/architectural decisions.
+    Logs decisions to blueprint_logic.log and decision_history.log.
+    Returns the decision meta dict.
+    """
+    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    checkpoint = json.loads(checkpoint_raw)
+    llm = build_decision_llm()
+
+    decision_model = os.getenv("OPENROUTER_MODEL_DECISION", "decision_model")
+    log_pm_audit_event("Decision", "START", model=decision_model)
+
+    checkpoint_summary = json.dumps(checkpoint, indent=2, ensure_ascii=False)
+
+    blueprint_raw = llm.call([
+        {"role": "system", "content": _DECISION_SYSTEM},
+        {"role": "user", "content": (
+            "Make decisions and write the blueprint based on this concept checkpoint:\n\n"
+            f"{checkpoint_summary}"
+        )},
+    ])
+
+    meta = _extract_decision_meta(blueprint_raw)
+    clean_blueprint = _strip_decision_meta(blueprint_raw)
+
+    write_workspace_file("current/blueprint.md", clean_blueprint)
+
+    selected_str = ", ".join(meta.get("selected_decisions", []))[:120] or None
+    rejected_str = ", ".join(meta.get("rejected_options", []))[:120] or None
+    tradeoff_str = ", ".join(meta.get("trade_offs", []))[:120] or None
+    reason_str = ", ".join(meta.get("reasons", []))[:120] or None
+
+    log_blueprint_logic(
+        "Decision",
+        selected=selected_str,
+        rejected=rejected_str,
+        trade_off=tradeoff_str,
+        reason=reason_str,
+        summary_ko=meta.get("ko_log_summary"),
+    )
+    for opt in meta.get("rejected_options", []):
+        log_decision_history(
+            "Decision",
+            rejected=opt,
+            reason="rejected in architecture decision phase",
+        )
+
+    log_pm_audit_event(
+        "Decision", "END",
+        selected=selected_str,
+        rejected=rejected_str,
+        output="current/blueprint.md",
+        summary_ko=meta.get("ko_log_summary"),
+    )
+
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Creative Production
+# ---------------------------------------------------------------------------
+
+def run_creative_production() -> dict:
+    """Phase 4: Creative Production
+
+    Reads blueprint.md, produces:
+    - current/founder_summary.md
+    - current/feature_spec.md
+    Uses two focused calls to the creative (sonnet-class) model.
+    Logs framing decisions to creative_process.log.
+    Returns combined meta dict.
+    """
+    blueprint = read_workspace_file("current/blueprint.md")
+    llm = build_creative_llm()
+
+    creative_model = os.getenv("OPENROUTER_MODEL_CREATIVE", "creative_model")
+    log_pm_audit_event("CreativeProd", "START", model=creative_model)
+
+    # Call 1: founder_summary.md
+    founder_raw = llm.call([
+        {"role": "system", "content": _FOUNDER_SUMMARY_SYSTEM},
+        {"role": "user", "content": (
+            f"Write the founder summary based on this blueprint:\n\n{blueprint}"
+        )},
+    ])
+    founder_meta = _extract_creative_meta(founder_raw)
+    clean_founder = _strip_creative_meta(founder_raw)
+    write_workspace_file("current/founder_summary.md", clean_founder)
+
+    # Call 2: feature_spec.md (receives both blueprint and founder summary for coherence)
+    spec_raw = llm.call([
+        {"role": "system", "content": _FEATURE_SPEC_SYSTEM},
+        {"role": "user", "content": (
+            f"Blueprint:\n{blueprint}\n\n"
+            f"Founder Summary:\n{clean_founder}\n\n"
+            "Write the feature specification."
+        )},
+    ])
+    spec_meta = _extract_creative_meta(spec_raw)
+    clean_spec = _strip_creative_meta(spec_raw)
+    write_workspace_file("current/feature_spec.md", clean_spec)
+
+    # founder_meta takes priority for combined summary
+    combined_meta = {**spec_meta, **founder_meta}
+
+    rejected_framings_str = ", ".join(combined_meta.get("rejected_framings", []))[:120] or None
+    log_creative_process(
+        "CreativeProd",
+        selected=combined_meta.get("narrative_focus"),
+        rejected=rejected_framings_str,
+        summary_ko=combined_meta.get("ko_log_summary"),
+    )
+    log_pm_audit_event(
+        "CreativeProd", "END",
+        selected=combined_meta.get("narrative_focus"),
+        output="current/founder_summary.md,current/feature_spec.md",
+        summary_ko=combined_meta.get("ko_log_summary"),
+    )
+
+    return combined_meta
 
 
 def run_planning():
