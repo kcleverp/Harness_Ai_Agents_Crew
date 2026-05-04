@@ -1,0 +1,85 @@
+# =============================================================
+# SECRETS & ENV
+# =============================================================
+.env
+.env.local
+.env.*.local
+# .env.example is intentionally tracked (template, no real keys)
+
+# =============================================================
+# PYTHON
+# =============================================================
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.so
+
+# virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# packaging / build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+
+# type checking / testing
+.mypy_cache/
+.dmypy.json
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =============================================================
+# WORKSPACE RUNTIME OUTPUTS
+# LLM 실행 결과물 — 실행마다 재생성되므로 추적 불필요
+# =============================================================
+
+# current/ 내 모든 생성 파일 (founder_summary, spec, handoff 등)
+pm_build_mvp/workspace/current/*
+# .gitkeep 만 보존 (디렉토리 구조 유지용)
+!pm_build_mvp/workspace/current/.gitkeep
+
+# archive/ 하위 스냅샷 폴더 (실행마다 생성됨)
+pm_build_mvp/workspace/archive/*
+!pm_build_mvp/workspace/archive/.gitkeep
+
+# =============================================================
+# LOGS
+# 실행 로그는 로컬 전용 — .gitkeep 으로 디렉토리만 추적
+# =============================================================
+pm_build_mvp/logs/*.log
+pm_build_mvp/logs/*.txt
+
+# =============================================================
+# TRANSLATOR SIDECAR (staleness hash, 필요 시 생성됨)
+# =============================================================
+pm_build_mvp/workspace/current/.founder_summary.en.sha256
+
+# =============================================================
+# OS ARTIFACTS
+# =============================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# =============================================================
+# IDE / EDITOR
+# =============================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =============================================================
+# CURSOR
+# 개인 설정은 추적하지 않음 (팀 공유 규칙은 .cursor/rules/ 에서 별도 관리)
+# =============================================================
+.cursor/mcp.json

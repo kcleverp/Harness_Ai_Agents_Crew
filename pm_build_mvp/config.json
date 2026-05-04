@@ -1,0 +1,30 @@
+{
+  "project": "pm_build_mvp",
+  "version": "0.1.0",
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "temperature": 0.3,
+    "max_tokens": 4096
+  },
+  "workspace": {
+    "root": "./workspace",
+    "current_dir": "./workspace/current",
+    "archive_dir": "./workspace/archive",
+    "raw_ideas_file": "./workspace/raw_ideas.md"
+  },
+  "logs": {
+    "dir": "./logs",
+    "level": "INFO"
+  },
+  "safety": {
+    "max_file_size_kb": 512,
+    "audit_enabled": true,
+    "schema_validation": true
+  },
+  "personas": {
+    "pm_director": "./personas/pm_director.md",
+    "product_pm": "./personas/product_pm.md",
+    "qa_pm": "./personas/qa_pm.md"
+  }
+}
