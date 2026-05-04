@@ -194,6 +194,100 @@ Rules:
 - 400-500 words total.\
 """
 
+_TECH_GEN_SYSTEM = """\
+You are a technical product manager generating structured JSON artifacts.
+
+Generate both a backlog and a dev handoff JSON from the provided context.
+
+Output ONLY a valid JSON object with EXACTLY this structure. No markdown. No explanation.
+{
+  "backlog": {
+    "tasks": []
+  },
+  "handoff": {
+    "project_name": "",
+    "objective": "",
+    "target_platform": "web",
+    "tech_stack": {
+      "status": "proposed",
+      "frontend": [],
+      "backend": [],
+      "database": [],
+      "infra": [],
+      "notes": ""
+    },
+    "tasks": []
+  }
+}
+
+Task schema (identical for backlog.tasks and handoff.tasks):
+{
+  "id": "TASK-01",
+  "title": "",
+  "owner": "frontend",
+  "priority": "high",
+  "dependencies": [],
+  "acceptance_criteria": [],
+  "files_to_create": [],
+  "files_to_modify": [],
+  "notes": ""
+}
+
+Enum constraints:
+- owner: frontend | backend | fullstack | qa
+- priority: high | medium | low
+- target_platform: web | mobile | api | desktop
+- tech_stack.status: proposed | pending | locked
+
+Rules:
+- Include 4-8 tasks total. No placeholder tasks.
+- Every task must have at least 2 acceptance_criteria.
+- Task title must be specific and actionable (no vague wording).
+- dependencies must reference only existing task IDs in this same list.
+- No circular dependencies.
+- Do not assign >80% of tasks to one owner when total tasks >= 5.
+- backlog.tasks and handoff.tasks must be identical.\
+"""
+
+_TECH_REVIEW_SYSTEM = """\
+You are a strict JSON schema reviewer for development task artifacts.
+
+Review the generated JSON and identify all issues.
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+{
+  "issues": ["issue description"],
+  "fix_requests": ["exact fix instruction"],
+  "ko_log_summary": "<1-2 sentence Korean summary of main issues found>"
+}
+
+Check for:
+1. Schema: all required fields present, correct types
+2. Enum values: owner (frontend/backend/fullstack/qa), priority (high/medium/low),
+   target_platform (web/mobile/api/desktop), tech_stack.status (proposed/pending/locked)
+3. Task completeness: acceptance_criteria >= 2, titles specific and actionable
+4. Dependency integrity: no undefined IDs, no circular dependencies
+5. Ownership: not >80% on one owner when task_count >= 5
+6. backlog.tasks and handoff.tasks must be identical
+
+If no issues found:
+{"issues": [], "fix_requests": [], "ko_log_summary": "모든 항목 유효함"}\
+"""
+
+_TECH_REVISE_SYSTEM = """\
+You are a technical product manager fixing JSON artifacts based on reviewer feedback.
+
+Apply every fix request exactly. Output ONLY the corrected JSON. No markdown. No explanation.
+
+Keep the same top-level structure:
+{"backlog": {"tasks": [...]}, "handoff": {"project_name": "", ...}}
+
+Rules:
+- Apply every fix request listed.
+- Keep tasks that were not flagged as issues.
+- backlog.tasks and handoff.tasks must be identical after fixes.\
+"""
+
 
 # ---------------------------------------------------------------------------
 # Phase response helpers
@@ -554,6 +648,152 @@ def run_creative_production() -> dict:
     )
 
     return combined_meta
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 helper: backlog structural validation
+# ---------------------------------------------------------------------------
+
+_VALID_OWNER = frozenset({"frontend", "backend", "fullstack", "qa"})
+_VALID_PRIORITY = frozenset({"high", "medium", "low"})
+_BACKLOG_REQUIRED_TASK_FIELDS = frozenset({
+    "id", "title", "owner", "priority", "dependencies",
+    "acceptance_criteria", "files_to_create", "files_to_modify", "notes",
+})
+
+
+def _validate_backlog(data: dict) -> list:
+    """Basic structural check for backlog.json.
+
+    Returns a list of error strings (empty = valid).
+    Does NOT raise — caller logs warnings and continues.
+    """
+    errors = []
+    tasks = data.get("tasks", [])
+    if not isinstance(tasks, list) or len(tasks) == 0:
+        errors.append("backlog.tasks is empty or not a list")
+        return errors
+
+    ids_seen = {t.get("id") for t in tasks if t.get("id")}
+    for i, task in enumerate(tasks):
+        prefix = f"tasks.{i}"
+        for field in _BACKLOG_REQUIRED_TASK_FIELDS:
+            if field not in task:
+                errors.append(f"{prefix}: missing field '{field}'")
+        if task.get("owner") not in _VALID_OWNER:
+            errors.append(f"{prefix}.owner: invalid value '{task.get('owner')}'")
+        if task.get("priority") not in _VALID_PRIORITY:
+            errors.append(f"{prefix}.priority: invalid value '{task.get('priority')}'")
+        if len(task.get("acceptance_criteria", [])) < 2:
+            errors.append(f"{prefix}: acceptance_criteria must have >= 2 items")
+        for dep in task.get("dependencies", []):
+            if dep not in ids_seen:
+                errors.append(f"{prefix}: undefined dependency '{dep}'")
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Technical Production
+# ---------------------------------------------------------------------------
+
+def run_technical_production() -> None:
+    """Phase 5: Technical Production
+
+    Reads blueprint.md, founder_summary.md, feature_spec.md.
+    Flash generates combined backlog + handoff draft.
+    mini reviews for schema/enum/completeness/dependency issues.
+    Flash revises if issues found.
+
+    Outputs:
+    - current/backlog.json  (with basic structural validation; warns, does not fail)
+    - current/handoff_to_dev.json  (raw; final gate is validate_handoff() in orchestration)
+    """
+    blueprint = read_workspace_file("current/blueprint.md")
+    founder_summary = read_workspace_file("current/founder_summary.md")
+    feature_spec = read_workspace_file("current/feature_spec.md")
+
+    gen_llm = build_technical_gen_llm()
+    review_llm = build_technical_review_llm()
+
+    tech_gen_model = os.getenv("OPENROUTER_MODEL_TECH_GEN", "tech_gen_model")
+    tech_review_model = os.getenv("OPENROUTER_MODEL_TECH_REVIEW", "tech_review_model")
+    log_pm_audit_event("TechnicalProd", "START", model=f"{tech_gen_model},{tech_review_model}")
+
+    context = (
+        f"## Blueprint\n{blueprint}\n\n"
+        f"## Founder Summary\n{founder_summary}\n\n"
+        f"## Feature Spec\n{feature_spec}"
+    )
+
+    # Step 1: Flash generates combined draft
+    gen_raw = gen_llm.call([
+        {"role": "system", "content": _TECH_GEN_SYSTEM},
+        {"role": "user", "content": f"Generate the backlog and handoff JSON from:\n\n{context}"},
+    ])
+    gen_cleaned = _clean_json_response(gen_raw)
+
+    # Step 2: mini reviews the draft
+    review_raw = review_llm.call([
+        {"role": "system", "content": _TECH_REVIEW_SYSTEM},
+        {"role": "user", "content": f"Review these JSON artifacts:\n\n{gen_cleaned}"},
+    ])
+    review_cleaned = _clean_json_response(review_raw)
+
+    try:
+        review_result = json.loads(review_cleaned)
+    except json.JSONDecodeError:
+        review_result = {"issues": [], "fix_requests": [], "ko_log_summary": None}
+
+    issues = review_result.get("issues", [])
+    fix_requests = review_result.get("fix_requests", [])
+
+    # Step 3: Flash revises only when issues exist
+    if issues:
+        fix_lines = "\n".join(f"- {r}" for r in fix_requests)
+        revised_raw = gen_llm.call([
+            {"role": "system", "content": _TECH_REVISE_SYSTEM},
+            {"role": "user", "content": (
+                f"Original JSON:\n{gen_cleaned}\n\n"
+                f"Fix requests:\n{fix_lines}"
+            )},
+        ])
+        final_combined = _clean_json_response(revised_raw)
+    else:
+        final_combined = gen_cleaned
+
+    # Parse combined output
+    try:
+        combined = json.loads(final_combined)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"TechnicalProd failed: cannot parse combined JSON output. {exc}"
+        ) from exc
+
+    backlog = combined.get("backlog", {})
+    handoff = combined.get("handoff", {})
+
+    # Validate backlog (warn only — does not fail the workflow)
+    backlog_errors = _validate_backlog(backlog)
+    if backlog_errors:
+        log_pm_audit(
+            f"Phase=TechnicalProd | Status=BACKLOG_WARN | Issues={backlog_errors[:3]}"
+        )
+
+    write_workspace_file(
+        "current/backlog.json",
+        json.dumps(backlog, indent=2, ensure_ascii=False),
+    )
+    write_workspace_file(
+        "current/handoff_to_dev.json",
+        json.dumps(handoff, indent=2, ensure_ascii=False),
+    )
+
+    log_pm_audit_event(
+        "TechnicalProd", "END",
+        output="current/backlog.json,current/handoff_to_dev.json",
+        summary_ko=review_result.get("ko_log_summary"),
+    )
 
 
 def run_planning():
