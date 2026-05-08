@@ -25,9 +25,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Optional
+
+from harness.telemetry_schema import is_valid_event
 
 _LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs"))
 _PROJ_DIR = os.path.join(_LOG_DIR, "projections")
@@ -231,6 +234,105 @@ def generate_pretty_view(
 # ---------------------------------------------------------------------------
 # Convenience runner
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# F8 — Deterministic reconstruction verification
+# ---------------------------------------------------------------------------
+
+def _projection_hash(events: list[dict]) -> str:
+    """Compute a deterministic SHA-256 hash of a sorted event list.
+
+    Sort key: (timestamp, event_id) — ensures stable ordering regardless of
+    insertion order. Same canonical input always produces the same hash.
+    """
+    stable = sorted(events, key=lambda e: (e.get("timestamp", ""), e.get("event_id", "")))
+    content = json.dumps(stable, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def verify_run_reconstruction(run_id: Optional[str] = None) -> dict:
+    """Verify that the canonical stream can be deterministically reconstructed.
+
+    Checks performed:
+      1. Schema validation — every event satisfies required fields
+      2. Orphan detection — parent_event_id references that do not exist
+      3. Run completeness — run_start and run_end events present (if run_id given)
+      4. Determinism hash — projection hash for each semantic slice
+
+    Args:
+        run_id: Verify only events for this run. None = full stream.
+
+    Returns:
+        {
+          "ok": bool,
+          "run_id": str | None,
+          "event_count": int,
+          "schema_errors": [str],
+          "orphaned_parents": [str],
+          "run_start_found": bool,
+          "run_end_found": bool,
+          "hashes": {"runtime": str, "decisions": str, "qa": str, "all": str},
+          "anomalies": [str],
+        }
+    """
+    events = _load_events(run_id)
+    event_ids = {ev.get("event_id") for ev in events}
+
+    schema_errors: list[str] = []
+    orphaned_parents: list[str] = []
+    anomalies: list[str] = []
+
+    for ev in events:
+        if not is_valid_event(ev):
+            schema_errors.append(
+                f"event_id={ev.get('event_id','?')} phase={ev.get('phase','?')} "
+                f"event_type={ev.get('event_type','?')}"
+            )
+        parent = ev.get("parent_event_id")
+        if parent and parent not in event_ids:
+            orphaned_parents.append(
+                f"event_id={ev.get('event_id','?')} -> parent={parent} (not found)"
+            )
+
+    run_start_found = any(
+        ev.get("event_type") == "run_start" for ev in events
+    )
+    run_end_found = any(
+        ev.get("event_type") in ("run_end", "run_complete") for ev in events
+    )
+
+    if run_id and not run_start_found:
+        anomalies.append(f"run_id={run_id}: run_start event not found in canonical stream")
+    if run_id and not run_end_found:
+        anomalies.append(f"run_id={run_id}: run_end event not found in canonical stream")
+    if schema_errors:
+        anomalies.append(f"{len(schema_errors)} event(s) failed schema validation")
+    if orphaned_parents:
+        anomalies.append(f"{len(orphaned_parents)} orphaned parent_event_id reference(s)")
+
+    runtime_events   = [ev for ev in events if ev.get("domain") == "workflow"]
+    decisions_events = [ev for ev in events if ev.get("domain") == "decision"]
+    qa_events        = [ev for ev in events if ev.get("domain") in ("qa", "system")]
+
+    hashes = {
+        "runtime":   _projection_hash(runtime_events),
+        "decisions": _projection_hash(decisions_events),
+        "qa":        _projection_hash(qa_events),
+        "all":       _projection_hash(events),
+    }
+
+    return {
+        "ok": len(anomalies) == 0,
+        "run_id": run_id,
+        "event_count": len(events),
+        "schema_errors": schema_errors,
+        "orphaned_parents": orphaned_parents,
+        "run_start_found": run_start_found,
+        "run_end_found": run_end_found,
+        "hashes": hashes,
+        "anomalies": anomalies,
+    }
+
 
 def generate_all_projections(run_id: Optional[str] = None) -> dict[str, int]:
     """Generate all projections and views from the canonical stream.
