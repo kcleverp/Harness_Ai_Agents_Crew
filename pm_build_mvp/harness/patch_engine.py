@@ -3,7 +3,7 @@ from .safe_file_tools import safe_read, apply_partial_patch, read_workspace_file
 from .audit_hooks import log_patch_action
 from .llm_factory import build_llm_from_env
 
-def run_patch_crew(file_path: str, errors: list):
+def run_patch_crew(file_path: str, errors: list, run_id: str = ""):
     error_details = "\n".join(errors)
     founder_context = read_workspace_file("current/docs/founder_summary.md")
     patch_llm = build_llm_from_env()
@@ -44,6 +44,10 @@ Action Steps:
     result = crew.kickoff()
     
     for error in errors:
-        log_patch_action(file_path, error, "Triggered Partial Patch Engine", error_code="SCHEMA_PATCH_TRIGGER")
+        log_patch_action(
+            file_path, error, "Triggered Partial Patch Engine",
+            error_code="SCHEMA_PATCH_TRIGGER",
+            run_id=run_id, phase="PatchEngine",
+        )
         
     return result

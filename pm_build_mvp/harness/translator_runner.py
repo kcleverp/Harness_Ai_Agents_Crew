@@ -8,7 +8,7 @@ Entry point: ensure_founder_summary_korean()
 import os
 import re
 
-from harness.audit_hooks import log_pm_audit
+from harness.audit_hooks import log_pm_audit, log_reasoning_event
 from harness.llm_factory import build_translator_llm_from_env
 from harness.safe_file_tools import read_workspace_file, write_workspace_file
 
@@ -20,7 +20,7 @@ _KO_PATH = "current/docs/founder_summary_ko.md"
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def ensure_founder_summary_korean() -> None:
+def ensure_founder_summary_korean(run_id: str = "") -> None:
     """Decide whether (re)generation is needed and run run_translator() if so.
 
     Evaluation order (first failing condition wins):
@@ -34,7 +34,7 @@ def ensure_founder_summary_korean() -> None:
       else                    → KO is valid and fresh, skip
     """
     try:
-        _run(reason_check=True)
+        _run(reason_check=True, run_id=run_id)
     except Exception as exc:
         # Swallow so the original exception from kickoff/validation is not masked.
         log_pm_audit(f"[translator] UNEXPECTED ERROR in ensure_founder_summary_korean: {exc}")
@@ -44,7 +44,7 @@ def ensure_founder_summary_korean() -> None:
 # Internal logic
 # ---------------------------------------------------------------------------
 
-def _run(reason_check: bool = True) -> None:
+def _run(reason_check: bool = True, run_id: str = "") -> None:
     workspace_dir = _workspace_dir()
     en_abs = os.path.join(workspace_dir, _EN_PATH)
     ko_abs = os.path.join(workspace_dir, _KO_PATH)
@@ -52,26 +52,56 @@ def _run(reason_check: bool = True) -> None:
     # --- Step 1/2/3: EN guard ---
     if not os.path.exists(en_abs):
         log_pm_audit("[translator] SKIP: founder_summary.md not found — no translation performed")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_skipped",
+                domain="translation", category="sync",
+                artifact=_EN_PATH, details={"reason": "source_not_found"},
+            )
         return
 
     try:
         en_content = _read_abs(en_abs)
     except Exception as exc:
         log_pm_audit(f"[translator] SKIP: cannot read founder_summary.md — {exc}")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_failed",
+                domain="translation", category="sync",
+                artifact=_EN_PATH, details={"reason": "source_read_error", "error": str(exc)},
+            )
         return
 
     if not en_content.strip():
         log_pm_audit("[translator] SKIP: founder_summary.md is empty — no translation performed")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_skipped",
+                domain="translation", category="sync",
+                artifact=_EN_PATH, details={"reason": "source_empty"},
+            )
         return
 
     # --- Step 4/5/6/7: KO guard + staleness ---
     reason = _needs_regeneration(en_abs, ko_abs)
     if reason is None:
         log_pm_audit("[translator] OK: founder_summary_ko.md is valid and up-to-date — skipped")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_skipped",
+                domain="translation", category="sync",
+                artifact=_KO_PATH, details={"reason": "up_to_date"},
+            )
         return
 
     log_pm_audit(f"[translator] REGENERATE: {reason}")
-    run_translator(en_content)
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id, phase="Translation", event_type="translation_stale",
+            domain="translation", category="sync",
+            artifact=_KO_PATH, details={"reason": reason},
+        )
+    run_translator(en_content, run_id=run_id)
 
 
 def _needs_regeneration(en_abs: str, ko_abs: str) -> str | None:
@@ -101,7 +131,7 @@ def _needs_regeneration(en_abs: str, ko_abs: str) -> str | None:
 # Core translation
 # ---------------------------------------------------------------------------
 
-def run_translator(en_content: str) -> None:
+def run_translator(en_content: str, run_id: str = "") -> None:
     """Translate en_content and write result to current/docs/founder_summary_ko.md.
 
     Uses Translator-specific LLM (Gemini Flash or fallback).
@@ -127,10 +157,22 @@ def run_translator(en_content: str) -> None:
         ko_content = llm.call(messages)
     except Exception as exc:
         log_pm_audit(f"[translator] LLM call failed: {exc}")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_failed",
+                domain="translation", category="sync",
+                artifact=_KO_PATH, details={"reason": "llm_call_failed", "error": str(exc)},
+            )
         return
 
     if not ko_content or not ko_content.strip():
         log_pm_audit("[translator] LLM returned empty response — founder_summary_ko.md NOT written")
+        if run_id:
+            log_reasoning_event(
+                run_id=run_id, phase="Translation", event_type="translation_failed",
+                domain="translation", category="sync",
+                artifact=_KO_PATH, details={"reason": "llm_empty_response"},
+            )
         return
 
     # Structure validation (lenient: warn only, keep file)
@@ -141,6 +183,13 @@ def run_translator(en_content: str) -> None:
 
     result = write_workspace_file(_KO_PATH, ko_content)
     log_pm_audit(f"[translator] write result: {result}")
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id, phase="Translation", event_type="translation_generated",
+            domain="translation", category="sync",
+            artifact=_KO_PATH,
+            details={"result": str(result), "structure_warnings": warnings},
+        )
 
 
 # ---------------------------------------------------------------------------

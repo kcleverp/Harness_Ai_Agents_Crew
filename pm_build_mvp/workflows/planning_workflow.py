@@ -1651,7 +1651,7 @@ def run_final_validation_and_patch(run_id: str = "") -> tuple:
             )
 
         if attempts < max_retries:
-            run_patch_crew("current/tech/handoff_to_dev.json", errors)
+            run_patch_crew("current/tech/handoff_to_dev.json", errors, run_id=run_id)
 
     return False, {"attempts": attempts, "errors": errors}
 
@@ -1780,7 +1780,7 @@ def run_planning():
             print(f"Risk Level Acceptable ({risk}).")
             snapshot_tag = "todo_mvp"
 
-        ensure_founder_summary_korean()
+        ensure_founder_summary_korean(run_id=run_id)
         translation_checked = True
 
         snapshot = create_archive_snapshot(snapshot_tag)
