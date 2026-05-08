@@ -5,14 +5,36 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Role → env var mapping (single source of truth)
 _ROLE_ENV_VARS: dict[str, str] = {
-    "idea":          "OPENROUTER_MODEL_IDEA",
-    "idea_critic":   "OPENROUTER_MODEL_IDEA_CRITIC",
-    "synthesis":     "OPENROUTER_MODEL_SYNTHESIS",
-    "decision":      "OPENROUTER_MODEL_DECISION",
-    "creative":      "OPENROUTER_MODEL_CREATIVE",
-    "tech_gen":      "OPENROUTER_MODEL_TECH_GEN",
-    "tech_review":   "OPENROUTER_MODEL_TECH_REVIEW",
+    # Original roles
+    "idea":              "OPENROUTER_MODEL_IDEA",
+    "idea_critic":       "OPENROUTER_MODEL_IDEA_CRITIC",
+    "synthesis":         "OPENROUTER_MODEL_SYNTHESIS",
+    "decision":          "OPENROUTER_MODEL_DECISION",
+    "creative":          "OPENROUTER_MODEL_CREATIVE",
+    "tech_gen":          "OPENROUTER_MODEL_TECH_GEN",
+    "tech_review":       "OPENROUTER_MODEL_TECH_REVIEW",
+    # v4 additions
+    "strategic_qa":      "OPENROUTER_MODEL_STRATEGIC_QA",
+    "investor_qa":       "OPENROUTER_MODEL_INVESTOR_QA",
+    "council_strategic": "OPENROUTER_MODEL_COUNCIL_STRATEGIC",
+    "council_execution": "OPENROUTER_MODEL_COUNCIL_EXECUTION",
+    "council_simple":    "OPENROUTER_MODEL_COUNCIL_SIMPLE",
+    "validation":        "OPENROUTER_MODEL_VALIDATION",
+    "failure_scenario":  "OPENROUTER_MODEL_FAILURE_SCENARIO",
+    "consistency":       "OPENROUTER_MODEL_CONSISTENCY",
+    # Escalation routing
+    "escalation_logic":  "OPENROUTER_MODEL_ESCALATION_LOGIC",
+    "escalation_ops":    "OPENROUTER_MODEL_ESCALATION_OPS",
+    "escalation_spec":   "OPENROUTER_MODEL_ESCALATION_SPEC",
 }
+
+# v4 roles that are optional during startup validation (warn, do not fail)
+_OPTIONAL_ROLES: frozenset[str] = frozenset({
+    "strategic_qa", "investor_qa",
+    "council_strategic", "council_execution", "council_simple",
+    "validation", "failure_scenario", "consistency",
+    "escalation_logic", "escalation_ops", "escalation_spec",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +116,65 @@ def build_technical_review_llm() -> LLM:
 
 
 # ---------------------------------------------------------------------------
+# v4 factory functions
+# ---------------------------------------------------------------------------
+
+def build_strategic_qa_llm() -> LLM:
+    """Phase C — Strategic QA: Founder Preservation Check (e.g. claude-sonnet-4.6)."""
+    return _build_role_llm("OPENROUTER_MODEL_STRATEGIC_QA")
+
+
+def build_investor_qa_llm() -> LLM:
+    """Phase C — Strategic QA: Market Viability Check (e.g. claude-opus-4.6)."""
+    return _build_role_llm("OPENROUTER_MODEL_INVESTOR_QA")
+
+
+def build_council_strategic_llm() -> LLM:
+    """Phase C — Decision Council: Strategic Judgment (e.g. claude-opus-4.6)."""
+    return _build_role_llm("OPENROUTER_MODEL_COUNCIL_STRATEGIC")
+
+
+def build_council_execution_llm() -> LLM:
+    """Phase C — Decision Council: Execution Realism (e.g. gpt-5.5)."""
+    return _build_role_llm("OPENROUTER_MODEL_COUNCIL_EXECUTION")
+
+
+def build_council_simple_llm() -> LLM:
+    """Phase C — Decision Council: Simplification (e.g. gpt-5-mini)."""
+    return _build_role_llm("OPENROUTER_MODEL_COUNCIL_SIMPLE")
+
+
+def build_validation_llm() -> LLM:
+    """Phase D — Validation Strategy Engine (e.g. claude-sonnet-4.6)."""
+    return _build_role_llm("OPENROUTER_MODEL_VALIDATION")
+
+
+def build_failure_scenario_llm() -> LLM:
+    """Phase D — Failure Scenario Generator (e.g. gemini-2.5-flash)."""
+    return _build_role_llm("OPENROUTER_MODEL_FAILURE_SCENARIO")
+
+
+def build_consistency_llm() -> LLM:
+    """Phase D — Cross-Document Consistency Guardrail (e.g. gpt-5-mini)."""
+    return _build_role_llm("OPENROUTER_MODEL_CONSISTENCY")
+
+
+def build_escalation_logic_llm() -> LLM:
+    """Escalation — Logic contradiction resolver (e.g. gpt-5.5)."""
+    return _build_role_llm("OPENROUTER_MODEL_ESCALATION_LOGIC")
+
+
+def build_escalation_ops_llm() -> LLM:
+    """Escalation — Operational ambiguity resolver (e.g. gemini-3.1-pro)."""
+    return _build_role_llm("OPENROUTER_MODEL_ESCALATION_OPS")
+
+
+def build_escalation_spec_llm() -> LLM:
+    """Escalation — Spec inconsistency resolver (e.g. claude-sonnet-4.6)."""
+    return _build_role_llm("OPENROUTER_MODEL_ESCALATION_SPEC")
+
+
+# ---------------------------------------------------------------------------
 # Translator (post-process Korean translation — existing path kept)
 # ---------------------------------------------------------------------------
 
@@ -153,9 +234,11 @@ def validate_llm_env() -> tuple[bool, list[str]]:
     Checks:
     - OPENROUTER_API_KEY presence
     - OPENROUTER_BASE_URL validity (http/https, no markdown format)
-    - All 7 role-specific model env vars
+    - All required role-specific model env vars (hard errors)
+    - Optional v4 role env vars (warn-only, printed but do not fail)
     """
     errors: list[str] = []
+    warnings: list[str] = []
     api_key, base_url = _pick_connection()
 
     if not api_key:
@@ -171,6 +254,15 @@ def validate_llm_env() -> tuple[bool, list[str]]:
 
     for role, env_var in _ROLE_ENV_VARS.items():
         if not os.getenv(env_var, "").strip():
-            errors.append(f"Missing model for role '{role}': set {env_var} in .env.")
+            if role in _OPTIONAL_ROLES:
+                warnings.append(
+                    f"[WARN] v4 model not configured for role '{role}': {env_var} "
+                    "(optional — phase will be skipped if not set)"
+                )
+            else:
+                errors.append(f"Missing model for role '{role}': set {env_var} in .env.")
+
+    if warnings:
+        print("\n".join(warnings))
 
     return len(errors) == 0, errors
