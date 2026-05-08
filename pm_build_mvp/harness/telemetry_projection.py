@@ -1,26 +1,75 @@
 """
 telemetry_projection.py — Batch projections from the canonical telemetry stream.
 
-Architecture:
-  canonical stream (reasoning_trace.jsonl)
-    └── projections/  (semantic slices — regenerable, non-canonical)
-          ├── runtime.log      domain=workflow
-          ├── decisions.log    domain=decision
-          └── qa.log           domain=qa | domain=system (kernel/integrity)
-    └── views/        (human-readable rendering — regenerable, non-canonical)
-          ├── pretty.log       human-readable multiline export
-          └── lineage_index.md chronological lineage table
+═══════════════════════════════════════════════════════════════
+ ARCHITECTURE
+═══════════════════════════════════════════════════════════════
 
-Regeneration policy:
-  - Projections are disposable. Delete and regenerate at any time.
-  - Canonical stream is the single source of truth and is never touched.
-  - Regeneration is deterministic: same canonical input → same output.
-  - Triggers: manual, post-run batch, post schema/taxonomy change.
+  canonical stream (reasoning_trace.jsonl)          ← IMMUTABLE
+    ├── projections/  [semantic slices]              ← disposable, regenerable
+    │     ├── runtime.log      domain=workflow
+    │     ├── decisions.log    domain=decision
+    │     └── qa.log           domain=qa | domain=system
+    └── views/        [human-readable rendering]     ← disposable, regenerable
+          ├── pretty.log       multiline human export
+          └── lineage_index.md chronological table
 
-Usage:
-  from harness.telemetry_projection import generate_all_projections
-  generate_all_projections()                        # full stream
-  generate_all_projections(run_id="abc123")         # single run slice
+Layer definitions:
+  Canonical   — append-only source of truth. Never rewritten or deleted.
+  Projections — semantic slices filtered by domain/category/event_type.
+                Meaning is read from the event itself, never inferred from phase.
+  Views       — rendering artifacts for operator readability. Not queryable.
+
+═══════════════════════════════════════════════════════════════
+ PROJECTION REGENERATION POLICY  (v1)
+═══════════════════════════════════════════════════════════════
+
+  1. DISPOSABILITY
+     Projections and views are disposable artifacts.
+     They may be deleted and regenerated from the canonical stream at any time
+     without loss of information.
+
+  2. IMMUTABILITY OF SOURCE
+     The canonical stream (reasoning_trace.jsonl) is append-only and immutable.
+     No projection operation may modify, truncate, or rewrite this file.
+
+  3. DETERMINISM
+     Regeneration MUST be deterministic:
+       same canonical input + same projection version → hash-equivalent output.
+     Sort key: (timestamp, event_id) — stable regardless of insertion order.
+     Verification: verify_run_reconstruction() computes and returns SHA-256 hashes.
+
+  4. SEMANTIC ISOLATION
+     Projections filter events by domain/category/event_type directly.
+     They MUST NOT infer event meaning from phase names or log file origins.
+
+  5. REGENERATION TRIGGERS
+     a. Manual     — operator calls generate_all_projections() at any time.
+     b. Post-run   — called automatically at end of run_planning() execution.
+     c. Schema change — after taxonomy/schema_version update, regenerate full stream.
+
+  6. VERSION BOUNDARY
+     If projection logic changes (new filter, new format), regenerate all projections
+     from the full canonical stream before deploying the new version.
+     Old projection files from a prior version are not forward-compatible.
+
+  7. SCOPE
+     Current scope: batch/post-processing only.
+     Real-time streaming projection is out of scope for this version.
+
+═══════════════════════════════════════════════════════════════
+ USAGE
+═══════════════════════════════════════════════════════════════
+
+  from harness.telemetry_projection import generate_all_projections, verify_run_reconstruction
+
+  generate_all_projections()                  # full stream
+  generate_all_projections(run_id="abc123")   # single run slice
+
+  result = verify_run_reconstruction(run_id="abc123")
+  # result["ok"] → bool
+  # result["hashes"] → {"runtime": ..., "decisions": ..., "qa": ..., "all": ...}
+  # result["anomalies"] → list of issues found
 """
 
 from __future__ import annotations
