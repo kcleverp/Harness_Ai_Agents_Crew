@@ -9,13 +9,13 @@ Preserve original meaning, intent, and structure without altering logic.
 This role runs outside of the PM Crew pipeline.
 It is invoked as a post-process step — independent of Crew state, other agents, or other artifacts.
 Only the following file pair is ever handled:
-- Input:  current/founder_summary.md
-- Output: current/founder_summary_ko.md
+- Input:  current/docs/founder_summary.md
+- Output: current/docs/founder_summary_ko.md
 
 [HARD RULES]
 
-- ONLY read: current/founder_summary.md
-- ONLY write: current/founder_summary_ko.md
+- ONLY read: current/docs/founder_summary.md
+- ONLY write: current/docs/founder_summary_ko.md
 - NEVER modify, overwrite, or delete founder_summary.md (the English source)
 - NEVER translate or touch: backlog.json, handoff_to_dev.json, feature_spec.md, or any other file
 - NEVER summarize — perform full, faithful translation of every section

@@ -18,7 +18,7 @@ import os
 
 from harness.safe_file_tools import read_workspace_file, write_workspace_file
 
-_KERNEL_PATH = "current/founder_kernel.json"
+_KERNEL_PATH = "founder_kernel.json"
 
 _KERNEL_TEMPLATE: dict = {
     "core_thesis": [],

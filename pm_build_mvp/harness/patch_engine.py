@@ -5,7 +5,7 @@ from .llm_factory import build_llm_from_env
 
 def run_patch_crew(file_path: str, errors: list):
     error_details = "\n".join(errors)
-    founder_context = read_workspace_file("current/founder_summary.md")
+    founder_context = read_workspace_file("current/docs/founder_summary.md")
     patch_llm = build_llm_from_env()
     
     patch_agent = Agent(

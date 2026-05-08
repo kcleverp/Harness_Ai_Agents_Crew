@@ -12,8 +12,8 @@ from harness.audit_hooks import log_pm_audit
 from harness.llm_factory import build_translator_llm_from_env
 from harness.safe_file_tools import read_workspace_file, write_workspace_file
 
-_EN_PATH = "current/founder_summary.md"
-_KO_PATH = "current/founder_summary_ko.md"
+_EN_PATH = "current/docs/founder_summary.md"
+_KO_PATH = "current/docs/founder_summary_ko.md"
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def _needs_regeneration(en_abs: str, ko_abs: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def run_translator(en_content: str) -> None:
-    """Translate en_content and write result to current/founder_summary_ko.md.
+    """Translate en_content and write result to current/docs/founder_summary_ko.md.
 
     Uses Translator-specific LLM (Gemini Flash or fallback).
     Does NOT use a Crew — single direct LLM call.

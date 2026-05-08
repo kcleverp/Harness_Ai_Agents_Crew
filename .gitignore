@@ -41,19 +41,26 @@ htmlcov/
 # =============================================================
 
 # current/ 내 모든 생성 파일 (founder_summary, spec, handoff 등)
-pm_build_mvp/workspace/current/*
-# .gitkeep 만 보존 (디렉토리 구조 유지용)
+pm_build_mvp/workspace/current/**
+# current/ 루트 .gitkeep 보존
 !pm_build_mvp/workspace/current/.gitkeep
+# 디렉토리는 다시 허용 (하위 .gitkeep 예외를 위해 필요)
+!pm_build_mvp/workspace/current/**/
+# 폴더 구조용 .gitkeep 만 보존
+!pm_build_mvp/workspace/current/**/.gitkeep
 
 # archive/ 하위 스냅샷 폴더 (실행마다 생성됨)
 pm_build_mvp/workspace/archive/*
 !pm_build_mvp/workspace/archive/.gitkeep
 
+# legacy_run 전체 제외
+pm_build_mvp/workspace/legacy_run/
 # =============================================================
 # LOGS
 # 실행 로그는 로컬 전용 — .gitkeep 으로 디렉토리만 추적
 # =============================================================
 pm_build_mvp/logs/*.log
+pm_build_mvp/logs/*.jsonl
 pm_build_mvp/logs/*.txt
 
 # =============================================================

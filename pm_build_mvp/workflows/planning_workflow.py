@@ -710,7 +710,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
     meta = _extract_log_meta(final_draft)
     clean_draft = _strip_log_meta(final_draft)
 
-    write_workspace_file("current/concept_draft.md", clean_draft)
+    write_workspace_file("current/docs/concept_draft.md", clean_draft)
 
     rejected_list = meta.get("rejected_features", [])
     risks_list = meta.get("risks", [])
@@ -720,13 +720,13 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
         selected=meta.get("selected_core"),
         rejected=",".join(rejected_list) or None,
         risk=",".join(risks_list) or None,
-        output="current/concept_draft.md",
+        output="current/docs/concept_draft.md",
         summary_ko=meta.get("ko_log_summary"),
     )
     for feat in rejected_list:
         log_decision_history("IdeaLoop", rejected=feat, reason="non-MVP scope")
 
-    return "current/concept_draft.md"
+    return "current/docs/concept_draft.md"
 
 
 # ---------------------------------------------------------------------------
@@ -741,7 +741,7 @@ def run_synthesis() -> dict:
     Returns the parsed checkpoint dict.
     Raises RuntimeError if valid JSON cannot be produced after 1 self-correction.
     """
-    draft = read_workspace_file("current/concept_draft.md")
+    draft = read_workspace_file("current/docs/concept_draft.md")
     llm = build_synthesis_llm()
 
     synthesis_model = os.getenv("OPENROUTER_MODEL_SYNTHESIS", "synthesis_model")
@@ -788,7 +788,7 @@ def run_synthesis() -> dict:
             ) from err2
 
     content = json.dumps(checkpoint, indent=2, ensure_ascii=False)
-    write_workspace_file("current/concept_checkpoint.json", content)
+    write_workspace_file("current/docs/concept_checkpoint.json", content)
 
     direction = checkpoint.get("recommended_direction", "")
     excluded = checkpoint.get("excluded_features", [])
@@ -796,7 +796,7 @@ def run_synthesis() -> dict:
     log_pm_audit_event(
         "Synthesis", "END",
         selected=direction[:80] if direction else None,
-        output="current/concept_checkpoint.json",
+        output="current/docs/concept_checkpoint.json",
         summary_ko=f"핵심 방향: {direction[:60]}" if direction else None,
     )
     for feat in excluded:
@@ -822,7 +822,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
     Logs decisions to blueprint_logic.log and decision_history.log.
     Returns the decision meta dict.
     """
-    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
     checkpoint = json.loads(checkpoint_raw)
     llm = build_decision_llm()
 
@@ -846,7 +846,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
     meta = _extract_decision_meta(blueprint_raw)
     clean_blueprint = _strip_decision_meta(blueprint_raw)
 
-    write_workspace_file("current/blueprint.md", clean_blueprint)
+    write_workspace_file("current/docs/blueprint.md", clean_blueprint)
 
     selected_str = ", ".join(meta.get("selected_decisions", []))[:120] or None
     rejected_str = ", ".join(meta.get("rejected_options", []))[:120] or None
@@ -872,7 +872,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
         "Decision", "END",
         selected=selected_str,
         rejected=rejected_str,
-        output="current/blueprint.md",
+        output="current/docs/blueprint.md",
         summary_ko=meta.get("ko_log_summary"),
     )
 
@@ -893,7 +893,7 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
     Logs framing decisions to creative_process.log.
     Returns combined meta dict.
     """
-    blueprint = read_workspace_file("current/blueprint.md")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
     llm = build_creative_llm()
 
     creative_model = os.getenv("OPENROUTER_MODEL_CREATIVE", "creative_model")
@@ -914,7 +914,7 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
     ])
     founder_meta = _extract_creative_meta(founder_raw)
     clean_founder = _strip_creative_meta(founder_raw)
-    write_workspace_file("current/founder_summary.md", clean_founder)
+    write_workspace_file("current/docs/founder_summary.md", clean_founder)
 
     # Call 2: feature_spec.md (receives both blueprint and founder summary for coherence)
     spec_raw = llm.call([
@@ -927,7 +927,7 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
     ])
     spec_meta = _extract_creative_meta(spec_raw)
     clean_spec = _strip_creative_meta(spec_raw)
-    write_workspace_file("current/feature_spec.md", clean_spec)
+    write_workspace_file("current/docs/feature_spec.md", clean_spec)
 
     # founder_meta takes priority for combined summary
     combined_meta = {**spec_meta, **founder_meta}
@@ -942,7 +942,7 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
     log_pm_audit_event(
         "CreativeProd", "END",
         selected=combined_meta.get("narrative_focus"),
-        output="current/founder_summary.md,current/feature_spec.md",
+        output="current/docs/founder_summary.md,current/docs/feature_spec.md",
         summary_ko=combined_meta.get("ko_log_summary"),
     )
 
@@ -1008,9 +1008,9 @@ def run_technical_production() -> None:
     - current/backlog.json  (with basic structural validation; warns, does not fail)
     - current/handoff_to_dev.json  (raw; final gate is validate_handoff() in orchestration)
     """
-    blueprint = read_workspace_file("current/blueprint.md")
-    founder_summary = read_workspace_file("current/founder_summary.md")
-    feature_spec = read_workspace_file("current/feature_spec.md")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
+    founder_summary = read_workspace_file("current/docs/founder_summary.md")
+    feature_spec = read_workspace_file("current/docs/feature_spec.md")
 
     gen_llm = build_technical_gen_llm()
     review_llm = build_technical_review_llm()
@@ -1080,17 +1080,17 @@ def run_technical_production() -> None:
         )
 
     write_workspace_file(
-        "current/backlog.json",
+        "current/tech/backlog.json",
         json.dumps(backlog, indent=2, ensure_ascii=False),
     )
     write_workspace_file(
-        "current/handoff_to_dev.json",
+        "current/tech/handoff_to_dev.json",
         json.dumps(handoff, indent=2, ensure_ascii=False),
     )
 
     log_pm_audit_event(
         "TechnicalProd", "END",
-        output="current/backlog.json,current/handoff_to_dev.json",
+        output="current/tech/backlog.json,current/tech/handoff_to_dev.json",
         summary_ko=review_result.get("ko_log_summary"),
     )
 
@@ -1112,8 +1112,8 @@ def run_product_qa_gate(
     Returns the QA result dict.
     Raises RuntimeError on immediate reject (fabricated founder evidence).
     """
-    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
-    blueprint = read_workspace_file("current/blueprint.md")
+    checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
     llm = build_idea_critic_llm()  # cheap model — product QA is structural
 
     log_pm_audit_event("ProductQA", "START")
@@ -1186,13 +1186,13 @@ def run_product_qa_gate(
         _run_escalation_retry(failure_type, context, run_id, qa_event_id)
 
     write_workspace_file(
-        "current/product_qa_result.json",
+        "current/qa/product_qa_result.json",
         json.dumps(result, indent=2, ensure_ascii=False),
     )
     log_pm_audit_event(
         "ProductQA", "END",
         risk=overall,
-        output="current/product_qa_result.json",
+        output="current/qa/product_qa_result.json",
         summary_ko=result.get("ko_summary"),
     )
     return result
@@ -1267,8 +1267,8 @@ def run_strategic_qa_gate(
         log_pm_audit("StrategicQA | Status=SKIPPED | Reason=OPENROUTER_MODEL_STRATEGIC_QA not configured")
         return {"overall_verdict": "skipped", "checks": []}
 
-    blueprint = read_workspace_file("current/blueprint.md")
-    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
+    checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
     log_pm_audit_event("StrategicQA", "START")
 
     context = f"## Blueprint\n{blueprint}\n\n## Concept Checkpoint\n{checkpoint_raw}"
@@ -1335,13 +1335,13 @@ def run_strategic_qa_gate(
         )
 
     write_workspace_file(
-        "current/strategic_qa_result.json",
+        "current/qa/strategic_qa_result.json",
         json.dumps(combined, indent=2, ensure_ascii=False),
     )
     log_pm_audit_event(
         "StrategicQA", "END",
         risk="high_severity" if combined["has_high_severity"] else "none",
-        output="current/strategic_qa_result.json",
+        output="current/qa/strategic_qa_result.json",
     )
     return combined
 
@@ -1365,9 +1365,9 @@ def run_decision_council(
         log_pm_audit("DecisionCouncil | Status=SKIPPED | Reason=OPENROUTER_MODEL_COUNCIL_STRATEGIC not configured")
         return {"verdict": "skipped", "approved_mvp": [], "blockers": []}
 
-    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
-    blueprint = read_workspace_file("current/blueprint.md")
-    strategic_qa_raw = read_workspace_file("current/strategic_qa_result.json")
+    checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
+    strategic_qa_raw = read_workspace_file("current/qa/strategic_qa_result.json")
     log_pm_audit_event("DecisionCouncil", "START")
 
     try:
@@ -1452,13 +1452,13 @@ def run_decision_council(
         )
 
     write_workspace_file(
-        "current/council_decision.json",
+        "current/decision/council_decision.json",
         json.dumps(result, indent=2, ensure_ascii=False),
     )
     log_pm_audit_event(
         "DecisionCouncil", "END",
         selected=result.get("verdict"),
-        output="current/council_decision.json",
+        output="current/decision/council_decision.json",
         summary_ko=result.get("ko_summary"),
     )
     return result
@@ -1482,8 +1482,8 @@ def run_validation_strategy_engine(
         log_pm_audit("ValidationEngine | Status=SKIPPED | Reason=OPENROUTER_MODEL_VALIDATION not configured")
         return {"core_hypothesis": [], "failure_modes": [], "skipped": True}
 
-    council_raw = read_workspace_file("current/council_decision.json")
-    blueprint = read_workspace_file("current/blueprint.md")
+    council_raw = read_workspace_file("current/decision/council_decision.json")
+    blueprint = read_workspace_file("current/docs/blueprint.md")
     log_pm_audit_event("ValidationEngine", "START")
 
     context = f"## Blueprint\n{blueprint}\n\n## Council Decision\n{council_raw}"
@@ -1526,12 +1526,12 @@ def run_validation_strategy_engine(
         )
 
     write_workspace_file(
-        "current/validation_strategy.json",
+        "current/validation/validation_strategy.json",
         json.dumps(val_result, indent=2, ensure_ascii=False),
     )
     log_pm_audit_event(
         "ValidationEngine", "END",
-        output="current/validation_strategy.json",
+        output="current/validation/validation_strategy.json",
         summary_ko=val_result.get("ko_summary"),
     )
     return val_result
@@ -1557,10 +1557,10 @@ def run_consistency_guardrail(
         log_pm_audit("ConsistencyGuardrail | Status=SKIPPED | Reason=OPENROUTER_MODEL_CONSISTENCY not configured")
         return {"overall_status": "skipped", "checks": []}
 
-    feature_spec = read_workspace_file("current/feature_spec.md")
-    backlog_raw = read_workspace_file("current/backlog.json")
-    validation_raw = read_workspace_file("current/validation_strategy.json")
-    founder_summary = read_workspace_file("current/founder_summary.md")
+    feature_spec = read_workspace_file("current/docs/feature_spec.md")
+    backlog_raw = read_workspace_file("current/tech/backlog.json")
+    validation_raw = read_workspace_file("current/validation/validation_strategy.json")
+    founder_summary = read_workspace_file("current/docs/founder_summary.md")
     log_pm_audit_event("ConsistencyGuardrail", "START")
 
     kernel_summary = ""
@@ -1600,13 +1600,13 @@ def run_consistency_guardrail(
             )
 
     write_workspace_file(
-        "current/consistency_result.json",
+        "current/qa/consistency_result.json",
         json.dumps(result, indent=2, ensure_ascii=False),
     )
     log_pm_audit_event(
         "ConsistencyGuardrail", "END",
         risk=result.get("overall_status"),
-        output="current/consistency_result.json",
+        output="current/qa/consistency_result.json",
         summary_ko=result.get("ko_summary"),
     )
     return result
@@ -1624,7 +1624,7 @@ def run_final_validation_and_patch() -> tuple:
     handoff_dict = {}
 
     while attempts < max_retries:
-        handoff_content = read_workspace_file("current/handoff_to_dev.json")
+        handoff_content = read_workspace_file("current/tech/handoff_to_dev.json")
         is_valid, errors = validate_handoff(handoff_content)
         if is_valid:
             print("Schema Validation Passed.")
@@ -1640,7 +1640,7 @@ def run_final_validation_and_patch() -> tuple:
             )
 
         if attempts < max_retries:
-            run_patch_crew("current/handoff_to_dev.json", errors)
+            run_patch_crew("current/tech/handoff_to_dev.json", errors)
 
     return False, {"attempts": attempts, "errors": errors}
 
@@ -1809,3 +1809,4 @@ def run_planning():
     finally:
         if not translation_checked:
             ensure_founder_summary_korean()
+
