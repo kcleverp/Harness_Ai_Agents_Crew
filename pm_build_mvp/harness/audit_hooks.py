@@ -2,9 +2,30 @@ import json
 import os
 import uuid
 import datetime
+import warnings
 from typing import Optional
 
 from harness.telemetry_schema import SCHEMA_VERSION
+
+# ---------------------------------------------------------------------------
+# Transition compatibility policy
+#
+# The following phase-centric log files are in TRANSITION (deprecated):
+#   decision_history.log  blueprint_logic.log  creative_process.log  patch_actions.log
+#
+# These files continue to be written for backward compatibility during the
+# transition period, but callers SHOULD pass run_id so that the canonical
+# stream (reasoning_trace.jsonl) is the primary write target.
+#
+# Transition end: when all callers pass run_id, legacy file writes will be removed.
+# ---------------------------------------------------------------------------
+
+_DEPRECATED_DIRECT_LOGS = frozenset({
+    "decision_history.log",
+    "blueprint_logic.log",
+    "creative_process.log",
+    "patch_actions.log",
+})
 
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs"))
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -167,8 +188,20 @@ def log_patch_action(
     phase: Optional[str] = None,
     parent_event_id: Optional[str] = None,
 ):
+    """Record a patch operation.
+
+    Canonical emit (when run_id provided): domain=qa, category=patching.
+    Legacy text log (patch_actions.log) written for compatibility — DEPRECATED.
+    Pass run_id to suppress this warning and emit to canonical stream only.
+    """
     msg = _fmt(File=filename, Target=patch_target, Code=error_code, Result=result)
     append_log("patch_actions.log", msg)
+    if not run_id:
+        warnings.warn(
+            "log_patch_action called without run_id — writing to legacy patch_actions.log only. "
+            "Pass run_id to emit to canonical stream.",
+            DeprecationWarning, stacklevel=2,
+        )
 
     if run_id:
         event_type = "patch_applied" if "success" in result.lower() else "patch_failed"
@@ -251,10 +284,17 @@ def log_decision_history(
     """Record a rejected option and its rationale.
 
     Canonical emit (when run_id provided): domain=decision, category=selection.
-    Legacy text log (decision_history.log) always written for compatibility.
+    Legacy text log (decision_history.log) written for compatibility — DEPRECATED.
+    Pass run_id to suppress this warning and emit to canonical stream only.
     """
     msg = _fmt(Phase=phase, Rejected=rejected, Reason=reason, Risk=risk, SummaryKo=summary_ko)
     append_log("decision_history.log", msg)
+    if not run_id:
+        warnings.warn(
+            "log_decision_history called without run_id — writing to legacy decision_history.log only. "
+            "Pass run_id to emit to canonical stream.",
+            DeprecationWarning, stacklevel=2,
+        )
 
     if run_id:
         log_reasoning_event(
@@ -285,13 +325,20 @@ def log_blueprint_logic(
     """Record Decision-phase structural/technical choices.
 
     Canonical emit (when run_id provided): domain=decision, category=tradeoff.
-    Legacy text log (blueprint_logic.log) always written for compatibility.
+    Legacy text log (blueprint_logic.log) written for compatibility — DEPRECATED.
+    Pass run_id to suppress this warning and emit to canonical stream only.
     """
     msg = _fmt(
         Phase=phase, Selected=selected, Rejected=rejected,
         TradeOff=trade_off, Reason=reason, SummaryKo=summary_ko,
     )
     append_log("blueprint_logic.log", msg)
+    if not run_id:
+        warnings.warn(
+            "log_blueprint_logic called without run_id — writing to legacy blueprint_logic.log only. "
+            "Pass run_id to emit to canonical stream.",
+            DeprecationWarning, stacklevel=2,
+        )
 
     if run_id:
         log_reasoning_event(
@@ -324,10 +371,17 @@ def log_creative_process(
     """Record Creative Production narrative direction choices.
 
     Canonical emit (when run_id provided): domain=decision, category=selection.
-    Legacy text log (creative_process.log) always written for compatibility.
+    Legacy text log (creative_process.log) written for compatibility — DEPRECATED.
+    Pass run_id to suppress this warning and emit to canonical stream only.
     """
     msg = _fmt(Phase=phase, Selected=selected, Rejected=rejected, Reason=reason, SummaryKo=summary_ko)
     append_log("creative_process.log", msg)
+    if not run_id:
+        warnings.warn(
+            "log_creative_process called without run_id — writing to legacy creative_process.log only. "
+            "Pass run_id to emit to canonical stream.",
+            DeprecationWarning, stacklevel=2,
+        )
 
     if run_id:
         log_reasoning_event(
