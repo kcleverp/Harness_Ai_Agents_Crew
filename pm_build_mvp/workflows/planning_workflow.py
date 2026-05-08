@@ -840,13 +840,14 @@ def run_planning():
       5. run_technical_production()— backlog.json, handoff_to_dev.json
       6. run_final_validation_and_patch() — validate_handoff + patch loop
       7. calculate_risk()
-      8. create_archive_snapshot()
-      9. ensure_founder_summary_korean() [always, via finally]
+      8. ensure_founder_summary_korean() — before snapshot so ko file is included
+      9. create_archive_snapshot()
     """
     log_pm_audit_event("Workflow", "START")
 
-    # ensure_founder_summary_korean() runs on every exit path via finally.
-    # It swallows its own exceptions so it never masks the real error.
+    translation_checked = False
+    # ensure_founder_summary_korean() runs before archive on the normal path.
+    # finally keeps it as a fallback for early returns and exceptions.
     try:
         print("Phase 1: Idea Loop")
         run_idea_loop()
@@ -890,6 +891,9 @@ def run_planning():
             print(f"Risk Level Acceptable ({risk}).")
             snapshot_tag = "todo_mvp"
 
+        ensure_founder_summary_korean()
+        translation_checked = True
+
         snapshot = create_archive_snapshot(snapshot_tag)
         print(f"Archived to {snapshot}")
 
@@ -917,6 +921,7 @@ def run_planning():
         }
 
     finally:
-        # Translation runs on every exit path (success, early return, exception).
-        # This is the ONLY place ensure_founder_summary_korean() is called.
-        ensure_founder_summary_korean()
+        # Translation runs before archive on the normal success path.
+        # Keep this as a fallback for early returns and exceptions.
+        if not translation_checked:
+            ensure_founder_summary_korean()
