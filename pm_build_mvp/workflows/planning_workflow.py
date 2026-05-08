@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import uuid
 from crewai import Agent, Task, Crew, Process
 from harness.safe_file_tools import safe_read, safe_write, read_workspace_file, write_workspace_file
 from harness.schema_validator import validate_handoff, HandoffSchema
@@ -8,14 +9,24 @@ from harness.risk_engine import calculate_risk
 from harness.audit_hooks import (
     log_pm_audit, log_run_summary, log_validation_error,
     log_pm_audit_event, log_decision_history, log_blueprint_logic, log_creative_process,
+    log_reasoning_event, log_system_integrity_alert, log_founder_override,
 )
 from harness.dev_exporter import create_archive_snapshot
 from harness.patch_engine import run_patch_crew
+from harness.kernel_guard import (
+    load_founder_kernel, save_founder_kernel,
+    inject_kernel_guard, assert_kernel_integrity,
+    validate_founder_evidence_ref,
+)
 from harness.llm_factory import (
     build_llm_from_env,
     build_idea_llm, build_idea_critic_llm, build_synthesis_llm,
     build_decision_llm, build_creative_llm,
     build_technical_gen_llm, build_technical_review_llm,
+    build_strategic_qa_llm, build_investor_qa_llm,
+    build_council_strategic_llm, build_council_execution_llm, build_council_simple_llm,
+    build_validation_llm, build_failure_scenario_llm, build_consistency_llm,
+    build_escalation_logic_llm, build_escalation_ops_llm, build_escalation_spec_llm,
 )
 from harness.translator_runner import ensure_founder_summary_korean
 
@@ -51,14 +62,26 @@ Output rules:
 
 _IDEA_CRITIQUE_SYSTEM = """\
 You are a strict MVP scope critic.
-Review the concept draft and output up to 5 bullet points.
+Review the concept draft and output a JSON array of critique items.
 
-Flag only:
-- Scope creep (non-MVP features that slipped in)
-- Contradictions or unclear requirements
-- Key risks not mentioned
+Output ONLY a valid JSON array. No markdown fences. No explanation. No other text.
 
-No praise. No suggestions. Problems only. 150 words max.\
+Each item must follow this schema exactly:
+{
+  "persona": "pm|ops|user|growth|finance",
+  "risk": "<specific risk or problem found>",
+  "confidence": <0.0 to 1.0>,
+  "confidence_basis": ["<reason 1>", "<reason 2>"],
+  "conflict_type": "scope_creep|contradiction|missing_risk|ux_vs_ops|growth_vs_scope|speed_vs_quality|priority_contradiction|none",
+  "suggested_fix": "<one-line fix or empty string>"
+}
+
+Rules:
+- Output 3 to 5 items maximum.
+- Flag only: scope creep, contradictions, missing risks, execution conflicts.
+- No praise. Problems only.
+- confidence_basis must contain at least 1 reason.
+- If no issues found, return an empty array: []\
 """
 
 _IDEA_REVISE_SYSTEM = """\
@@ -288,6 +311,203 @@ Rules:
 - backlog.tasks and handoff.tasks must be identical after fixes.\
 """
 
+# ---------------------------------------------------------------------------
+# v4 system prompts
+# ---------------------------------------------------------------------------
+
+_PRODUCT_QA_SYSTEM = """\
+You are a strict product QA reviewer.
+Perform structural and evidence validation on the provided concept checkpoint.
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "qa_results": [
+    {
+      "qa_type": "structural|spec|validation|semantic|priority_contradiction",
+      "passed": true,
+      "finding": "<description or empty string if passed>",
+      "severity": "none|warn|fail"
+    }
+  ],
+  "evidence_bindings": [
+    {
+      "claim": "<claim being validated>",
+      "evidence_type": "founder_conviction|market_observation|operational_assumption|user_research|unknown",
+      "source_ref": "<e.g. kernel.non_negotiables[0] or 'none'>",
+      "assumption": "<explicit assumption or empty string>",
+      "confidence": "high|medium|low|unverified"
+    }
+  ],
+  "overall_status": "pass|warn|fail",
+  "failure_type": "none|logic|spec|validation|semantic|priority_contradiction",
+  "ko_summary": "<1-2 sentence Korean summary>"
+}
+
+QA areas to check:
+1. Structural QA: logical consistency, no contradictions
+2. Spec QA: implementation feasibility, not vague
+3. Validation QA: hypotheses are measurable
+4. Semantic QA: cross-artifact terminology consistency
+5. Priority QA: no execution-level contradictions in must_have_mvp
+
+Evidence rules:
+- For every major claim in must_have_mvp, produce one evidence_binding.
+- If evidence_type is founder_conviction, source_ref MUST start with "kernel."
+- If you cannot find a real kernel reference, set source_ref to "none" and confidence to "unverified".\
+"""
+
+_STRATEGIC_QA_FOUNDER_SYSTEM = """\
+You are a founder thesis preservation reviewer.
+Your ONLY job is to check whether the product blueprint drifts from the founder kernel.
+
+You are STRICTLY PROHIBITED from:
+- suggesting new features
+- expanding scope
+- exploring alternatives
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "checks": [
+    {
+      "check_type": "thesis_drift|edge_dilution|generic_saasization|anti_pattern_violation",
+      "passed": true,
+      "finding": "<description or empty if passed>",
+      "severity": "none|warn|high"
+    }
+  ],
+  "overall_verdict": "preserved|warn|violated",
+  "ko_summary": "<1-2 sentence Korean summary>"
+}\
+"""
+
+_STRATEGIC_QA_INVESTOR_SYSTEM = """\
+You are a market viability analyst.
+Your ONLY job is to assess whether this MVP can survive in the market.
+
+You are STRICTLY PROHIBITED from:
+- suggesting new features
+- expanding scope
+- exploring alternatives
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "checks": [
+    {
+      "check_type": "market_survival|scalability|moat_weakness|demand_uncertainty",
+      "passed": true,
+      "finding": "<description or empty if passed>",
+      "severity": "none|warn|high"
+    }
+  ],
+  "overall_verdict": "viable|warn|not_viable",
+  "ko_summary": "<1-2 sentence Korean summary>"
+}\
+"""
+
+_DECISION_COUNCIL_SYSTEM = """\
+You are a senior product architect making the final MVP approval decision.
+
+Given a concept checkpoint and strategic QA results, produce the final council decision.
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "approved_mvp": ["<approved feature or direction>"],
+  "rejected_features": ["<rejected feature>"],
+  "tradeoffs": ["<explicit tradeoff accepted>"],
+  "confidence": {
+    "base_confidence": <0.0 to 1.0>,
+    "critical_penalties": [
+      {"source": "<source>", "severity": "high|medium|low", "penalty": <negative float>}
+    ],
+    "final_confidence": <0.0 to 1.0>
+  },
+  "confidence_penalties": ["<human-readable penalty explanation>"],
+  "blockers": ["<unresolved blocker or empty list if none>"],
+  "verdict": "approved|rejected|needs_revision",
+  "ko_summary": "<1-2 sentence Korean summary>"
+}
+
+Confidence rules:
+- base_confidence: your raw confidence before penalties
+- If any strategic QA check has severity "high", apply a penalty that brings final_confidence to <= 0.30
+- final_confidence = base_confidence + sum(penalties), clamped to [0.0, 1.0]
+- verdict must be "approved" only when final_confidence >= 0.50 AND blockers is empty\
+"""
+
+_VALIDATION_STRATEGY_SYSTEM = """\
+You are a product validation strategist.
+Generate a measurable validation structure for the approved MVP.
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "core_hypothesis": [
+    {
+      "id": "H-01",
+      "statement": "<hypothesis>",
+      "kpi": "<measurable KPI>",
+      "minimum_success_signal": "<minimum threshold to validate>",
+      "signal_latency": "immediate|short|medium|long",
+      "decision_impact": "high|medium|low"
+    }
+  ],
+  "failure_modes": [],
+  "counterfactuals": ["<what would invalidate this hypothesis>"],
+  "next_experiments": ["<first actionable experiment>"],
+  "ko_summary": "<1-2 sentence Korean summary>"
+}\
+"""
+
+_FAILURE_SCENARIO_SYSTEM = """\
+You are a failure scenario generator.
+Generate realistic collapse scenarios for the provided MVP concept.
+
+Output ONLY a valid JSON array. No markdown. No explanation.
+
+Each item:
+{
+  "scenario_id": "FS-01",
+  "failure_type": "no_show_cascade|abandonment|coordination_collapse|demand_miss|ops_breakdown",
+  "description": "<realistic failure description>",
+  "trigger": "<what causes this failure>",
+  "severity": "critical|high|medium",
+  "early_signal": "<observable early warning sign>"
+}
+
+Generate 3 to 5 scenarios. Focus on realistic, product-specific risks.\
+"""
+
+_CONSISTENCY_GUARDRAIL_SYSTEM = """\
+You are a cross-document semantic consistency checker.
+Check alignment between the provided artifacts.
+
+Output ONLY a valid JSON object. No markdown. No explanation.
+
+Required schema:
+{
+  "checks": [
+    {
+      "comparison": "spec_vs_backlog|validation_vs_kpi|validation_vs_spec|kernel_vs_outputs",
+      "passed": true,
+      "mismatch": "<description of mismatch or empty if passed>",
+      "severity": "none|warn|fail",
+      "auto_fixable": true
+    }
+  ],
+  "overall_status": "pass|warn|fail",
+  "ko_summary": "<1-2 sentence Korean summary>"
+}\
+"""
+
 
 # ---------------------------------------------------------------------------
 # Phase response helpers
@@ -363,11 +583,47 @@ def _strip_creative_meta(text: str) -> str:
 # Phase 1: Idea Loop
 # ---------------------------------------------------------------------------
 
-def run_idea_loop() -> str:
+def _parse_structured_critiques(raw_critique: str) -> list:
+    """Parse structured critique JSON array from model output.
+
+    Returns empty list on parse failure (critique revisions continue unaffected).
+    """
+    try:
+        cleaned = _clean_json_response(raw_critique)
+        result = json.loads(cleaned)
+        if isinstance(result, list):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return []
+
+
+def _format_critique_for_revision(critiques: list, fallback_text: str) -> str:
+    """Convert structured critiques to bullet text for revision prompt.
+
+    Falls back to raw text if parsing failed (empty list).
+    """
+    if not critiques:
+        return fallback_text
+    lines = []
+    for item in critiques:
+        risk = item.get("risk", "")
+        fix = item.get("suggested_fix", "")
+        persona = item.get("persona", "")
+        line = f"- [{persona}] {risk}"
+        if fix:
+            line += f" → {fix}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_event_id: str | None = None) -> str:
     """Phase 1: Idea Loop
 
     5-step Flash/mini iteration over raw_ideas.md.
     Outputs current/concept_draft.md with required sections.
+    Injects Founder Kernel Guard into generation prompts when kernel_data provided.
+    Logs structured critique confidence to reasoning_trace.jsonl.
     Returns the output file path.
     """
     raw_idea = read_workspace_file("raw_ideas.md")
@@ -379,40 +635,73 @@ def run_idea_loop() -> str:
 
     log_pm_audit_event("IdeaLoop", "START", model=f"{idea_model},{critic_model}")
 
+    # Kernel guard injection
+    gen_system = _IDEA_GEN_SYSTEM
+    revise_system = _IDEA_REVISE_SYSTEM
+    if kernel_data:
+        gen_system = inject_kernel_guard(_IDEA_GEN_SYSTEM, kernel_data)
+        revise_system = inject_kernel_guard(_IDEA_REVISE_SYSTEM, kernel_data)
+
     # Step 1: Flash expands raw idea → draft v1
     draft_v1 = idea_llm.call([
-        {"role": "system", "content": _IDEA_GEN_SYSTEM},
+        {"role": "system", "content": gen_system},
         {"role": "user", "content": f"Expand this raw idea into an MVP concept:\n\n{raw_idea}"},
     ])
 
-    # Step 2: Mini critiques draft v1
-    critique_1 = critic_llm.call([
+    # Step 2: Mini produces structured critique of draft v1
+    critique_raw_1 = critic_llm.call([
         {"role": "system", "content": _IDEA_CRITIQUE_SYSTEM},
         {"role": "user", "content": f"Critique this MVP concept draft:\n\n{draft_v1}"},
     ])
+    critiques_1 = _parse_structured_critiques(critique_raw_1)
+    critique_text_1 = _format_critique_for_revision(critiques_1, critique_raw_1)
+
+    # Log critique confidence events
+    loop_event_id = parent_event_id
+    for item in critiques_1:
+        loop_event_id = log_reasoning_event(
+            run_id=run_id, phase="IdeaLoop",
+            event_type="critique_generated",
+            artifact="concept_draft_v1",
+            details=item,
+            parent_event_id=loop_event_id,
+        )
 
     # Step 3: Flash revises based on critique → draft v2
     draft_v2 = idea_llm.call([
-        {"role": "system", "content": _IDEA_REVISE_SYSTEM},
+        {"role": "system", "content": revise_system},
         {"role": "user", "content": (
             f"Original draft:\n{draft_v1}\n\n"
-            f"Critique to apply:\n{critique_1}\n\n"
+            f"Critique to apply:\n{critique_text_1}\n\n"
             "Revise the draft."
         )},
     ])
 
-    # Step 4: Mini critiques draft v2
-    critique_2 = critic_llm.call([
+    # Step 4: Mini produces structured critique of draft v2
+    critique_raw_2 = critic_llm.call([
         {"role": "system", "content": _IDEA_CRITIQUE_SYSTEM},
         {"role": "user", "content": f"Critique this revised MVP concept draft:\n\n{draft_v2}"},
     ])
+    critiques_2 = _parse_structured_critiques(critique_raw_2)
+    critique_text_2 = _format_critique_for_revision(critiques_2, critique_raw_2)
+
+    # Log conflict_type events for detected conflicts
+    for item in critiques_2:
+        if item.get("conflict_type") not in ("none", None, ""):
+            loop_event_id = log_reasoning_event(
+                run_id=run_id, phase="IdeaLoop",
+                event_type="conflict_detected",
+                artifact="concept_draft_v2",
+                details={"conflict_type": item.get("conflict_type"), "risk": item.get("risk"), "confidence": item.get("confidence")},
+                parent_event_id=loop_event_id,
+            )
 
     # Step 5: Flash generates final draft with LOG_META
     final_draft = idea_llm.call([
-        {"role": "system", "content": _IDEA_REVISE_SYSTEM},
+        {"role": "system", "content": revise_system},
         {"role": "user", "content": (
             f"Revised draft:\n{draft_v2}\n\n"
-            f"Final critique to apply:\n{critique_2}\n\n"
+            f"Final critique to apply:\n{critique_text_2}\n\n"
             "Generate the definitive final concept draft."
         )},
     ])
@@ -525,7 +814,7 @@ def run_synthesis() -> dict:
 # Phase 3: Decision
 # ---------------------------------------------------------------------------
 
-def run_decision() -> dict:
+def run_decision(kernel_data: dict | None = None) -> dict:
     """Phase 3: Decision
 
     Reads concept_checkpoint.json, produces definitive blueprint.md.
@@ -542,8 +831,12 @@ def run_decision() -> dict:
 
     checkpoint_summary = json.dumps(checkpoint, indent=2, ensure_ascii=False)
 
+    decision_system = _DECISION_SYSTEM
+    if kernel_data:
+        decision_system = inject_kernel_guard(_DECISION_SYSTEM, kernel_data)
+
     blueprint_raw = llm.call([
-        {"role": "system", "content": _DECISION_SYSTEM},
+        {"role": "system", "content": decision_system},
         {"role": "user", "content": (
             "Make decisions and write the blueprint based on this concept checkpoint:\n\n"
             f"{checkpoint_summary}"
@@ -590,7 +883,7 @@ def run_decision() -> dict:
 # Phase 4: Creative Production
 # ---------------------------------------------------------------------------
 
-def run_creative_production() -> dict:
+def run_creative_production(kernel_data: dict | None = None) -> dict:
     """Phase 4: Creative Production
 
     Reads blueprint.md, produces:
@@ -606,9 +899,15 @@ def run_creative_production() -> dict:
     creative_model = os.getenv("OPENROUTER_MODEL_CREATIVE", "creative_model")
     log_pm_audit_event("CreativeProd", "START", model=creative_model)
 
+    founder_system = _FOUNDER_SUMMARY_SYSTEM
+    spec_system = _FEATURE_SPEC_SYSTEM
+    if kernel_data:
+        founder_system = inject_kernel_guard(_FOUNDER_SUMMARY_SYSTEM, kernel_data)
+        spec_system = inject_kernel_guard(_FEATURE_SPEC_SYSTEM, kernel_data)
+
     # Call 1: founder_summary.md
     founder_raw = llm.call([
-        {"role": "system", "content": _FOUNDER_SUMMARY_SYSTEM},
+        {"role": "system", "content": founder_system},
         {"role": "user", "content": (
             f"Write the founder summary based on this blueprint:\n\n{blueprint}"
         )},
@@ -619,7 +918,7 @@ def run_creative_production() -> dict:
 
     # Call 2: feature_spec.md (receives both blueprint and founder summary for coherence)
     spec_raw = llm.call([
-        {"role": "system", "content": _FEATURE_SPEC_SYSTEM},
+        {"role": "system", "content": spec_system},
         {"role": "user", "content": (
             f"Blueprint:\n{blueprint}\n\n"
             f"Founder Summary:\n{clean_founder}\n\n"
@@ -796,6 +1095,523 @@ def run_technical_production() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase v4-B6: Product QA Gate
+# ---------------------------------------------------------------------------
+
+def run_product_qa_gate(
+    kernel_data: dict | None = None,
+    run_id: str = "",
+    parent_event_id: str | None = None,
+) -> dict:
+    """Phase v4-B6: Product QA Gate
+
+    Runs structural/spec/validation/semantic/priority QA with evidence binding.
+    - fabricated founder evidence → system_integrity_alert + immediate reject
+    - failure_type logged for escalation routing
+    Returns the QA result dict.
+    Raises RuntimeError on immediate reject (fabricated founder evidence).
+    """
+    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    blueprint = read_workspace_file("current/blueprint.md")
+    llm = build_idea_critic_llm()  # cheap model — product QA is structural
+
+    log_pm_audit_event("ProductQA", "START")
+
+    context = (
+        f"## Concept Checkpoint\n{checkpoint_raw}\n\n"
+        f"## Blueprint\n{blueprint}"
+    )
+    if kernel_data:
+        kernel_summary = json.dumps(
+            {k: v for k, v in kernel_data.items() if k != "kernel_hash"},
+            ensure_ascii=False,
+        )
+        context = f"## Founder Kernel\n{kernel_summary}\n\n" + context
+
+    raw = llm.call([
+        {"role": "system", "content": _PRODUCT_QA_SYSTEM},
+        {"role": "user", "content": f"Run product QA on these artifacts:\n\n{context}"},
+    ])
+
+    try:
+        result = json.loads(_clean_json_response(raw))
+    except (json.JSONDecodeError, ValueError):
+        log_pm_audit("ProductQA | Status=PARSE_FAIL | falling back to warn")
+        result = {"overall_status": "warn", "failure_type": "none", "qa_results": [], "evidence_bindings": []}
+
+    # --- Evidence integrity validation ---
+    integrity_violations = []
+    for binding in result.get("evidence_bindings", []):
+        if binding.get("evidence_type") == "founder_conviction":
+            source_ref = binding.get("source_ref", "none")
+            if source_ref == "none" or not validate_founder_evidence_ref(source_ref, kernel_data or {}):
+                alert_id = log_system_integrity_alert(
+                    run_id=run_id,
+                    phase="ProductQA",
+                    claim=binding.get("claim", ""),
+                    source_ref=source_ref,
+                    parent_event_id=parent_event_id,
+                )
+                integrity_violations.append({"claim": binding.get("claim"), "source_ref": source_ref, "alert_id": alert_id})
+
+    if integrity_violations:
+        raise RuntimeError(
+            f"ProductQA: IMMEDIATE REJECT — fabricated founder evidence detected. "
+            f"Violations: {integrity_violations}. "
+            "This is a system integrity violation, not an escalation."
+        )
+
+    # --- Log QA failures ---
+    qa_event_id = parent_event_id
+    for qa in result.get("qa_results", []):
+        if not qa.get("passed", True):
+            qa_event_id = log_reasoning_event(
+                run_id=run_id, phase="ProductQA",
+                event_type="validation_warning",
+                artifact="concept_checkpoint",
+                details={
+                    "qa_type": qa.get("qa_type"),
+                    "finding": qa.get("finding"),
+                    "severity": qa.get("severity"),
+                    "failure_type": result.get("failure_type"),
+                },
+                parent_event_id=qa_event_id,
+            )
+
+    # --- Escalation routing for failures ---
+    overall = result.get("overall_status", "pass")
+    failure_type = result.get("failure_type", "none")
+    if overall == "fail" and failure_type != "none":
+        _run_escalation_retry(failure_type, context, run_id, qa_event_id)
+
+    write_workspace_file(
+        "current/product_qa_result.json",
+        json.dumps(result, indent=2, ensure_ascii=False),
+    )
+    log_pm_audit_event(
+        "ProductQA", "END",
+        risk=overall,
+        output="current/product_qa_result.json",
+        summary_ko=result.get("ko_summary"),
+    )
+    return result
+
+
+def _run_escalation_retry(
+    failure_type: str,
+    context: str,
+    run_id: str,
+    parent_event_id: str | None = None,
+) -> None:
+    """Route QA failure to the specialist escalation model.
+
+    failure_type → escalation model:
+      logic                 → escalation_logic_llm
+      priority_contradiction→ escalation_logic_llm
+      spec                  → escalation_spec_llm
+      semantic              → escalation_spec_llm
+      validation            → escalation_ops_llm
+    """
+    _ESCALATION_MAP = {
+        "logic": ("OPENROUTER_MODEL_ESCALATION_LOGIC", build_escalation_logic_llm),
+        "priority_contradiction": ("OPENROUTER_MODEL_ESCALATION_LOGIC", build_escalation_logic_llm),
+        "spec": ("OPENROUTER_MODEL_ESCALATION_SPEC", build_escalation_spec_llm),
+        "semantic": ("OPENROUTER_MODEL_ESCALATION_SPEC", build_escalation_spec_llm),
+        "validation": ("OPENROUTER_MODEL_ESCALATION_OPS", build_escalation_ops_llm),
+    }
+    entry = _ESCALATION_MAP.get(failure_type)
+    if not entry:
+        return
+    env_var, factory = entry
+    if not os.getenv(env_var, "").strip():
+        log_pm_audit(
+            f"Escalation | Status=SKIPPED | FailureType={failure_type} | "
+            f"Reason={env_var} not configured"
+        )
+        return
+    try:
+        llm = factory()
+        llm.call([
+            {"role": "system", "content": "You are a specialist reviewer. Identify the root cause of the following QA failure and suggest a specific resolution."},
+            {"role": "user", "content": f"Failure type: {failure_type}\n\nContext:\n{context}"},
+        ])
+        log_reasoning_event(
+            run_id=run_id, phase="Escalation",
+            event_type="escalation_triggered",
+            artifact="product_qa",
+            details={"failure_type": failure_type, "model": os.getenv(env_var, "")},
+            parent_event_id=parent_event_id,
+        )
+    except Exception as exc:
+        log_pm_audit(f"Escalation | Status=ERROR | FailureType={failure_type} | Error={exc}")
+
+
+# ---------------------------------------------------------------------------
+# Phase v4-C7: Strategic QA Gate
+# ---------------------------------------------------------------------------
+
+def run_strategic_qa_gate(
+    kernel_data: dict | None = None,
+    run_id: str = "",
+    parent_event_id: str | None = None,
+) -> dict:
+    """Phase v4-C7: Strategic QA Gate
+
+    Founder Preservation Check + Market Viability Check.
+    Runs ONLY after Product QA passes.
+    Strictly prohibits exploration or feature expansion.
+    Returns combined strategic QA result dict.
+    """
+    if not os.getenv("OPENROUTER_MODEL_STRATEGIC_QA", "").strip():
+        log_pm_audit("StrategicQA | Status=SKIPPED | Reason=OPENROUTER_MODEL_STRATEGIC_QA not configured")
+        return {"overall_verdict": "skipped", "checks": []}
+
+    blueprint = read_workspace_file("current/blueprint.md")
+    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    log_pm_audit_event("StrategicQA", "START")
+
+    context = f"## Blueprint\n{blueprint}\n\n## Concept Checkpoint\n{checkpoint_raw}"
+    if kernel_data:
+        kernel_summary = json.dumps(
+            {k: v for k, v in kernel_data.items() if k != "kernel_hash"},
+            ensure_ascii=False,
+        )
+        context = f"## Founder Kernel\n{kernel_summary}\n\n" + context
+
+    # Founder Preservation Check
+    founder_llm = build_strategic_qa_llm()
+    founder_raw = founder_llm.call([
+        {"role": "system", "content": _STRATEGIC_QA_FOUNDER_SYSTEM},
+        {"role": "user", "content": f"Check founder thesis preservation:\n\n{context}"},
+    ])
+    try:
+        founder_result = json.loads(_clean_json_response(founder_raw))
+    except (json.JSONDecodeError, ValueError):
+        founder_result = {"overall_verdict": "warn", "checks": []}
+
+    # Market Viability Check (optional — needs investor model)
+    investor_result = {"overall_verdict": "skipped", "checks": []}
+    if os.getenv("OPENROUTER_MODEL_INVESTOR_QA", "").strip():
+        investor_llm = build_investor_qa_llm()
+        investor_raw = investor_llm.call([
+            {"role": "system", "content": _STRATEGIC_QA_INVESTOR_SYSTEM},
+            {"role": "user", "content": f"Check market viability:\n\n{context}"},
+        ])
+        try:
+            investor_result = json.loads(_clean_json_response(investor_raw))
+        except (json.JSONDecodeError, ValueError):
+            investor_result = {"overall_verdict": "warn", "checks": []}
+
+    combined = {
+        "founder_preservation": founder_result,
+        "market_viability": investor_result,
+        "has_high_severity": any(
+            c.get("severity") == "high"
+            for checks in [founder_result.get("checks", []), investor_result.get("checks", [])]
+            for c in checks
+        ),
+    }
+
+    # Log critical violations
+    qa_event_id = parent_event_id
+    for check in founder_result.get("checks", []) + investor_result.get("checks", []):
+        if not check.get("passed", True) or check.get("severity") in ("warn", "high"):
+            qa_event_id = log_reasoning_event(
+                run_id=run_id, phase="StrategicQA",
+                event_type="validation_warning",
+                artifact="blueprint",
+                details=check,
+                parent_event_id=qa_event_id,
+            )
+
+    if combined["has_high_severity"]:
+        log_reasoning_event(
+            run_id=run_id, phase="StrategicQA",
+            event_type="escalation_triggered",
+            artifact="strategic_qa",
+            details={"reason": "high_severity_risk_detected", "combined": combined},
+            parent_event_id=qa_event_id,
+        )
+
+    write_workspace_file(
+        "current/strategic_qa_result.json",
+        json.dumps(combined, indent=2, ensure_ascii=False),
+    )
+    log_pm_audit_event(
+        "StrategicQA", "END",
+        risk="high_severity" if combined["has_high_severity"] else "none",
+        output="current/strategic_qa_result.json",
+    )
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# Phase v4-C8: Decision Council
+# ---------------------------------------------------------------------------
+
+def run_decision_council(
+    kernel_data: dict | None = None,
+    run_id: str = "",
+    parent_event_id: str | None = None,
+) -> dict:
+    """Phase v4-C8: Decision Council
+
+    Final MVP approval with tradeoff resolution and confidence aggregation.
+    Applies non-linear confidence clamp when Strategic QA has high severity risks.
+    Returns council decision dict.
+    """
+    if not os.getenv("OPENROUTER_MODEL_COUNCIL_STRATEGIC", "").strip():
+        log_pm_audit("DecisionCouncil | Status=SKIPPED | Reason=OPENROUTER_MODEL_COUNCIL_STRATEGIC not configured")
+        return {"verdict": "skipped", "approved_mvp": [], "blockers": []}
+
+    checkpoint_raw = read_workspace_file("current/concept_checkpoint.json")
+    blueprint = read_workspace_file("current/blueprint.md")
+    strategic_qa_raw = read_workspace_file("current/strategic_qa_result.json")
+    log_pm_audit_event("DecisionCouncil", "START")
+
+    try:
+        strategic_qa = json.loads(strategic_qa_raw) if not strategic_qa_raw.startswith("Error:") else {}
+    except json.JSONDecodeError:
+        strategic_qa = {}
+
+    has_high_severity = strategic_qa.get("has_high_severity", False)
+
+    context = (
+        f"## Concept Checkpoint\n{checkpoint_raw}\n\n"
+        f"## Blueprint\n{blueprint}\n\n"
+        f"## Strategic QA Results\n{json.dumps(strategic_qa, indent=2, ensure_ascii=False)}"
+    )
+
+    council_system = _DECISION_COUNCIL_SYSTEM
+    if kernel_data:
+        council_system = inject_kernel_guard(_DECISION_COUNCIL_SYSTEM, kernel_data)
+
+    llm = build_council_strategic_llm()
+    raw = llm.call([
+        {"role": "system", "content": council_system},
+        {"role": "user", "content": f"Make the final MVP decision:\n\n{context}"},
+    ])
+
+    try:
+        result = json.loads(_clean_json_response(raw))
+    except (json.JSONDecodeError, ValueError):
+        log_pm_audit("DecisionCouncil | Status=PARSE_FAIL | returning default reject")
+        result = {"verdict": "needs_revision", "approved_mvp": [], "blockers": ["council_parse_failure"]}
+
+    # Non-linear confidence clamp: if any strategic QA high severity, force confidence <= 0.30
+    if has_high_severity:
+        conf = result.get("confidence", {})
+        current_final = conf.get("final_confidence", 0.5)
+        if current_final > 0.30:
+            penalty = 0.30 - current_final
+            conf.setdefault("critical_penalties", []).append({
+                "source": "strategic_qa_high_severity",
+                "severity": "high",
+                "penalty": round(penalty, 4),
+            })
+            conf["final_confidence"] = 0.30
+            result["confidence"] = conf
+            result.setdefault("confidence_penalties", []).append(
+                "Non-linear clamp applied: Strategic QA high severity risk forced confidence to 0.30"
+            )
+            log_reasoning_event(
+                run_id=run_id, phase="DecisionCouncil",
+                event_type="confidence_penalty_applied",
+                artifact="council_decision",
+                details={"clamp": 0.30, "previous": round(current_final, 4)},
+                parent_event_id=parent_event_id,
+            )
+
+    # Enforce approval rules
+    final_confidence = result.get("confidence", {}).get("final_confidence", 0.5)
+    blockers = result.get("blockers", [])
+    if result.get("verdict") == "approved" and (final_confidence < 0.50 or blockers):
+        result["verdict"] = "needs_revision"
+        result.setdefault("confidence_penalties", []).append(
+            f"Approval blocked: final_confidence={final_confidence:.2f} or unresolved blockers={blockers}"
+        )
+
+    council_event_id = log_reasoning_event(
+        run_id=run_id, phase="DecisionCouncil",
+        event_type="council_approved" if result.get("verdict") == "approved" else "council_rejected",
+        artifact="council_decision",
+        details={
+            "verdict": result.get("verdict"),
+            "final_confidence": final_confidence,
+            "blockers": blockers,
+        },
+        parent_event_id=parent_event_id,
+    )
+
+    # Log rejected features to decision_history
+    for feat in result.get("rejected_features", []):
+        log_decision_history(
+            "DecisionCouncil", rejected=feat,
+            reason="rejected by decision council",
+        )
+
+    write_workspace_file(
+        "current/council_decision.json",
+        json.dumps(result, indent=2, ensure_ascii=False),
+    )
+    log_pm_audit_event(
+        "DecisionCouncil", "END",
+        selected=result.get("verdict"),
+        output="current/council_decision.json",
+        summary_ko=result.get("ko_summary"),
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase v4-D9: Validation Strategy Engine
+# ---------------------------------------------------------------------------
+
+def run_validation_strategy_engine(
+    run_id: str = "",
+    parent_event_id: str | None = None,
+) -> dict:
+    """Phase v4-D9: Validation Strategy Engine
+
+    Generates hypothesis/KPI/failure mode structure.
+    Failure scenarios generated by cheap model.
+    Returns combined validation strategy dict.
+    """
+    if not os.getenv("OPENROUTER_MODEL_VALIDATION", "").strip():
+        log_pm_audit("ValidationEngine | Status=SKIPPED | Reason=OPENROUTER_MODEL_VALIDATION not configured")
+        return {"core_hypothesis": [], "failure_modes": [], "skipped": True}
+
+    council_raw = read_workspace_file("current/council_decision.json")
+    blueprint = read_workspace_file("current/blueprint.md")
+    log_pm_audit_event("ValidationEngine", "START")
+
+    context = f"## Blueprint\n{blueprint}\n\n## Council Decision\n{council_raw}"
+
+    # Core hypothesis + KPI mapping
+    val_llm = build_validation_llm()
+    val_raw = val_llm.call([
+        {"role": "system", "content": _VALIDATION_STRATEGY_SYSTEM},
+        {"role": "user", "content": f"Generate the validation strategy:\n\n{context}"},
+    ])
+    try:
+        val_result = json.loads(_clean_json_response(val_raw))
+    except (json.JSONDecodeError, ValueError):
+        val_result = {"core_hypothesis": [], "failure_modes": [], "counterfactuals": [], "next_experiments": []}
+
+    # Failure scenarios (cheap model, optional)
+    failure_scenarios = []
+    if os.getenv("OPENROUTER_MODEL_FAILURE_SCENARIO", "").strip():
+        fs_llm = build_failure_scenario_llm()
+        fs_raw = fs_llm.call([
+            {"role": "system", "content": _FAILURE_SCENARIO_SYSTEM},
+            {"role": "user", "content": f"Generate failure scenarios for:\n\n{context}"},
+        ])
+        try:
+            failure_scenarios = json.loads(_clean_json_response(fs_raw))
+        except (json.JSONDecodeError, ValueError):
+            failure_scenarios = []
+
+    val_result["failure_modes"] = failure_scenarios
+
+    # Log hypothesis events
+    val_event_id = parent_event_id
+    for hyp in val_result.get("core_hypothesis", []):
+        val_event_id = log_reasoning_event(
+            run_id=run_id, phase="ValidationEngine",
+            event_type="validation_warning",
+            artifact=hyp.get("id", "hypothesis"),
+            details={"kpi": hyp.get("kpi"), "signal_latency": hyp.get("signal_latency"), "decision_impact": hyp.get("decision_impact")},
+            parent_event_id=val_event_id,
+        )
+
+    write_workspace_file(
+        "current/validation_strategy.json",
+        json.dumps(val_result, indent=2, ensure_ascii=False),
+    )
+    log_pm_audit_event(
+        "ValidationEngine", "END",
+        output="current/validation_strategy.json",
+        summary_ko=val_result.get("ko_summary"),
+    )
+    return val_result
+
+
+# ---------------------------------------------------------------------------
+# Phase v4-D10: Production Consistency Guardrail
+# ---------------------------------------------------------------------------
+
+def run_consistency_guardrail(
+    kernel_data: dict | None = None,
+    run_id: str = "",
+    parent_event_id: str | None = None,
+) -> dict:
+    """Phase v4-D10: Production Consistency Guardrail
+
+    Cross-document semantic alignment check.
+    warn → logged and auto-fix hint recorded
+    fail → escalation_triggered event logged
+    Returns guardrail result dict.
+    """
+    if not os.getenv("OPENROUTER_MODEL_CONSISTENCY", "").strip():
+        log_pm_audit("ConsistencyGuardrail | Status=SKIPPED | Reason=OPENROUTER_MODEL_CONSISTENCY not configured")
+        return {"overall_status": "skipped", "checks": []}
+
+    feature_spec = read_workspace_file("current/feature_spec.md")
+    backlog_raw = read_workspace_file("current/backlog.json")
+    validation_raw = read_workspace_file("current/validation_strategy.json")
+    founder_summary = read_workspace_file("current/founder_summary.md")
+    log_pm_audit_event("ConsistencyGuardrail", "START")
+
+    kernel_summary = ""
+    if kernel_data:
+        kernel_summary = f"## Founder Kernel\n{json.dumps({k: v for k, v in kernel_data.items() if k != 'kernel_hash'}, ensure_ascii=False)}\n\n"
+
+    context = (
+        f"{kernel_summary}"
+        f"## Feature Spec\n{feature_spec}\n\n"
+        f"## Backlog\n{backlog_raw}\n\n"
+        f"## Validation Strategy\n{validation_raw}\n\n"
+        f"## Founder Summary\n{founder_summary}"
+    )
+
+    llm = build_consistency_llm()
+    raw = llm.call([
+        {"role": "system", "content": _CONSISTENCY_GUARDRAIL_SYSTEM},
+        {"role": "user", "content": f"Check cross-document consistency:\n\n{context}"},
+    ])
+
+    try:
+        result = json.loads(_clean_json_response(raw))
+    except (json.JSONDecodeError, ValueError):
+        result = {"overall_status": "warn", "checks": []}
+
+    # Process checks
+    cg_event_id = parent_event_id
+    for check in result.get("checks", []):
+        severity = check.get("severity", "none")
+        if severity in ("warn", "fail"):
+            cg_event_id = log_reasoning_event(
+                run_id=run_id, phase="ConsistencyGuardrail",
+                event_type="validation_warning" if severity == "warn" else "escalation_triggered",
+                artifact=check.get("comparison", "document"),
+                details=check,
+                parent_event_id=cg_event_id,
+            )
+
+    write_workspace_file(
+        "current/consistency_result.json",
+        json.dumps(result, indent=2, ensure_ascii=False),
+    )
+    log_pm_audit_event(
+        "ConsistencyGuardrail", "END",
+        risk=result.get("overall_status"),
+        output="current/consistency_result.json",
+        summary_ko=result.get("ko_summary"),
+    )
+    return result
+
+
 def run_final_validation_and_patch() -> tuple:
     """Validate handoff_to_dev.json and patch if needed.
 
@@ -830,36 +1646,89 @@ def run_final_validation_and_patch() -> tuple:
 
 
 def run_planning():
-    """Phase-based MVP planning workflow.
+    """Phase-based MVP planning workflow (v4).
 
     Execution order:
-      1. run_idea_loop()          — concept_draft.md
-      2. run_synthesis()          — concept_checkpoint.json
-      3. run_decision()           — blueprint.md
-      4. run_creative_production()— founder_summary.md, feature_spec.md
-      5. run_technical_production()— backlog.json, handoff_to_dev.json
-      6. run_final_validation_and_patch() — validate_handoff + patch loop
-      7. calculate_risk()
-      8. ensure_founder_summary_korean() — before snapshot so ko file is included
-      9. create_archive_snapshot()
+      0. load_founder_kernel()     — founder_kernel.json (create template if missing)
+      1. run_idea_loop()           — concept_draft.md + kernel guard
+      2. run_synthesis()           — concept_checkpoint.json
+      3. run_decision()            — blueprint.md + kernel guard
+      4. [v4] run_product_qa_gate()       — product_qa_result.json
+      5. [v4] run_strategic_qa_gate()     — strategic_qa_result.json
+      6. [v4] run_decision_council()      — council_decision.json
+      7. run_creative_production() — founder_summary.md, feature_spec.md + kernel guard
+      8. run_technical_production()— backlog.json, handoff_to_dev.json
+      9. run_final_validation_and_patch() — validate_handoff + patch loop
+     10. [v4] run_validation_strategy_engine() — validation_strategy.json
+     11. [v4] run_consistency_guardrail()      — consistency_result.json
+     12. calculate_risk()
+     13. ensure_founder_summary_korean()
+     14. create_archive_snapshot()
     """
+    run_id = str(uuid.uuid4())
     log_pm_audit_event("Workflow", "START")
+    log_reasoning_event(run_id=run_id, phase="Workflow", event_type="critique_generated",
+                        artifact="run_start", details={"run_id": run_id})
+
+    # Load and verify founder kernel
+    kernel_data = load_founder_kernel()
+    save_founder_kernel(kernel_data)  # ensures hash is stamped
+    kernel_hash = kernel_data.get("kernel_hash", "")
+    log_pm_audit(f"KernelGuard | Status=LOADED | Hash={kernel_hash[:12]}...")
 
     translation_checked = False
-    # ensure_founder_summary_korean() runs before archive on the normal path.
-    # finally keeps it as a fallback for early returns and exceptions.
+    workflow_event_id = None
+
     try:
         print("Phase 1: Idea Loop")
-        run_idea_loop()
+        workflow_event_id = log_reasoning_event(
+            run_id=run_id, phase="IdeaLoop", event_type="critique_generated",
+            artifact="raw_ideas", details={"step": "start"}, parent_event_id=workflow_event_id,
+        )
+        run_idea_loop(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
+        assert_kernel_integrity(kernel_data, "post-IdeaLoop")
 
         print("Phase 2: Synthesis")
         run_synthesis()
 
         print("Phase 3: Decision")
-        run_decision()
+        run_decision(kernel_data=kernel_data)
+        assert_kernel_integrity(kernel_data, "post-Decision")
+
+        print("Phase v4-B6: Product QA Gate")
+        qa_result = run_product_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
+        workflow_event_id = log_reasoning_event(
+            run_id=run_id, phase="ProductQA", event_type="validation_warning",
+            artifact="product_qa_result",
+            details={"overall_status": qa_result.get("overall_status")},
+            parent_event_id=workflow_event_id,
+        )
+
+        print("Phase v4-C7: Strategic QA Gate")
+        strategic_result = run_strategic_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
+        workflow_event_id = log_reasoning_event(
+            run_id=run_id, phase="StrategicQA", event_type="validation_warning",
+            artifact="strategic_qa_result",
+            details={"has_high_severity": strategic_result.get("has_high_severity", False)},
+            parent_event_id=workflow_event_id,
+        )
+
+        print("Phase v4-C8: Decision Council")
+        council_result = run_decision_council(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
+        council_verdict = council_result.get("verdict", "skipped")
+        workflow_event_id = log_reasoning_event(
+            run_id=run_id, phase="DecisionCouncil",
+            event_type="council_approved" if council_verdict == "approved" else "council_rejected",
+            artifact="council_decision",
+            details={"verdict": council_verdict},
+            parent_event_id=workflow_event_id,
+        )
+        if council_verdict not in ("approved", "skipped"):
+            log_pm_audit(f"Workflow | DecisionCouncil verdict={council_verdict} — continuing in warn mode")
 
         print("Phase 4: Creative Production")
-        run_creative_production()
+        run_creative_production(kernel_data=kernel_data)
+        assert_kernel_integrity(kernel_data, "post-CreativeProd")
 
         print("Phase 5: Technical Production")
         run_technical_production()
@@ -878,6 +1747,12 @@ def run_planning():
             }
 
         handoff_dict = result
+
+        print("Phase v4-D9: Validation Strategy Engine")
+        run_validation_strategy_engine(run_id=run_id, parent_event_id=workflow_event_id)
+
+        print("Phase v4-D10: Consistency Guardrail")
+        run_consistency_guardrail(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
 
         risk_result = calculate_risk(handoff_dict)
         risk = risk_result["score"]
@@ -901,6 +1776,8 @@ def run_planning():
             "concept_draft.md", "concept_checkpoint.json", "blueprint.md",
             "founder_summary.md", "feature_spec.md",
             "backlog.json", "handoff_to_dev.json", "founder_summary_ko.md",
+            "product_qa_result.json", "strategic_qa_result.json",
+            "council_decision.json", "validation_strategy.json", "consistency_result.json",
         ]
         log_run_summary(
             True,
@@ -910,6 +1787,12 @@ def run_planning():
             result.get("attempts", 0) if isinstance(result, dict) else 0,
             len(reasons),
         )
+        log_reasoning_event(
+            run_id=run_id, phase="Workflow", event_type="council_approved",
+            artifact="run_complete",
+            details={"risk": risk, "council_verdict": council_verdict, "kernel_hash": kernel_hash[:12]},
+            parent_event_id=workflow_event_id,
+        )
         log_pm_audit_event("Workflow", "END", risk=str(risk))
 
         return {
@@ -918,10 +1801,11 @@ def run_planning():
             "attempts": 0,
             "errors": [],
             "risk_reasons": reasons,
+            "council_verdict": council_verdict,
+            "kernel_hash": kernel_hash,
+            "run_id": run_id,
         }
 
     finally:
-        # Translation runs before archive on the normal success path.
-        # Keep this as a fallback for early returns and exceptions.
         if not translation_checked:
             ensure_founder_summary_korean()
