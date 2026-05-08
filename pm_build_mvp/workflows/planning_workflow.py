@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import re
 import uuid
@@ -29,6 +29,7 @@ from harness.llm_factory import (
     build_escalation_logic_llm, build_escalation_ops_llm, build_escalation_spec_llm,
 )
 from harness.translator_runner import ensure_founder_summary_korean
+from harness.telemetry_projection import generate_all_projections
 
 def load_persona(filename):
     with open(os.path.join(os.path.dirname(__file__), f"../personas/{filename}"), "r", encoding="utf-8") as f:
@@ -633,7 +634,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
     idea_model = os.getenv("OPENROUTER_MODEL_IDEA", "idea_model")
     critic_model = os.getenv("OPENROUTER_MODEL_IDEA_CRITIC", "critic_model")
 
-    log_pm_audit_event("IdeaLoop", "START", model=f"{idea_model},{critic_model}")
+    log_pm_audit_event("IdeaLoop", "START", model=f"{idea_model},{critic_model}", run_id=run_id)
 
     # Kernel guard injection
     gen_system = _IDEA_GEN_SYSTEM
@@ -722,9 +723,10 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
         risk=",".join(risks_list) or None,
         output="current/docs/concept_draft.md",
         summary_ko=meta.get("ko_log_summary"),
+        run_id=run_id,
     )
     for feat in rejected_list:
-        log_decision_history("IdeaLoop", rejected=feat, reason="non-MVP scope")
+        log_decision_history("IdeaLoop", rejected=feat, reason="non-MVP scope", run_id=run_id)
 
     return "current/docs/concept_draft.md"
 
@@ -733,7 +735,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
 # Phase 2: Synthesis
 # ---------------------------------------------------------------------------
 
-def run_synthesis() -> dict:
+def run_synthesis(run_id: str = "") -> dict:
     """Phase 2: Synthesis
 
     Compresses concept_draft.md into a structured JSON checkpoint.
@@ -745,7 +747,7 @@ def run_synthesis() -> dict:
     llm = build_synthesis_llm()
 
     synthesis_model = os.getenv("OPENROUTER_MODEL_SYNTHESIS", "synthesis_model")
-    log_pm_audit_event("Synthesis", "START", model=synthesis_model)
+    log_pm_audit_event("Synthesis", "START", model=synthesis_model, run_id=run_id)
 
     base_msgs = [
         {"role": "system", "content": _SYNTHESIS_SYSTEM},
@@ -798,6 +800,7 @@ def run_synthesis() -> dict:
         selected=direction[:80] if direction else None,
         output="current/docs/concept_checkpoint.json",
         summary_ko=f"핵심 방향: {direction[:60]}" if direction else None,
+        run_id=run_id,
     )
     for feat in excluded:
         log_decision_history(
@@ -805,6 +808,7 @@ def run_synthesis() -> dict:
             rejected=feat,
             reason="excluded in synthesis checkpoint",
             summary_ko=f"{feat} MVP 범위에서 제외됨",
+            run_id=run_id,
         )
 
     return checkpoint
@@ -814,7 +818,7 @@ def run_synthesis() -> dict:
 # Phase 3: Decision
 # ---------------------------------------------------------------------------
 
-def run_decision(kernel_data: dict | None = None) -> dict:
+def run_decision(kernel_data: dict | None = None, run_id: str = "") -> dict:
     """Phase 3: Decision
 
     Reads concept_checkpoint.json, produces definitive blueprint.md.
@@ -827,7 +831,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
     llm = build_decision_llm()
 
     decision_model = os.getenv("OPENROUTER_MODEL_DECISION", "decision_model")
-    log_pm_audit_event("Decision", "START", model=decision_model)
+    log_pm_audit_event("Decision", "START", model=decision_model, run_id=run_id)
 
     checkpoint_summary = json.dumps(checkpoint, indent=2, ensure_ascii=False)
 
@@ -860,12 +864,14 @@ def run_decision(kernel_data: dict | None = None) -> dict:
         trade_off=tradeoff_str,
         reason=reason_str,
         summary_ko=meta.get("ko_log_summary"),
+        run_id=run_id,
     )
     for opt in meta.get("rejected_options", []):
         log_decision_history(
             "Decision",
             rejected=opt,
             reason="rejected in architecture decision phase",
+            run_id=run_id,
         )
 
     log_pm_audit_event(
@@ -874,6 +880,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
         rejected=rejected_str,
         output="current/docs/blueprint.md",
         summary_ko=meta.get("ko_log_summary"),
+        run_id=run_id,
     )
 
     return meta
@@ -883,7 +890,7 @@ def run_decision(kernel_data: dict | None = None) -> dict:
 # Phase 4: Creative Production
 # ---------------------------------------------------------------------------
 
-def run_creative_production(kernel_data: dict | None = None) -> dict:
+def run_creative_production(kernel_data: dict | None = None, run_id: str = "") -> dict:
     """Phase 4: Creative Production
 
     Reads blueprint.md, produces:
@@ -897,7 +904,7 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
     llm = build_creative_llm()
 
     creative_model = os.getenv("OPENROUTER_MODEL_CREATIVE", "creative_model")
-    log_pm_audit_event("CreativeProd", "START", model=creative_model)
+    log_pm_audit_event("CreativeProd", "START", model=creative_model, run_id=run_id)
 
     founder_system = _FOUNDER_SUMMARY_SYSTEM
     spec_system = _FEATURE_SPEC_SYSTEM
@@ -938,12 +945,14 @@ def run_creative_production(kernel_data: dict | None = None) -> dict:
         selected=combined_meta.get("narrative_focus"),
         rejected=rejected_framings_str,
         summary_ko=combined_meta.get("ko_log_summary"),
+        run_id=run_id,
     )
     log_pm_audit_event(
         "CreativeProd", "END",
         selected=combined_meta.get("narrative_focus"),
         output="current/docs/founder_summary.md,current/docs/feature_spec.md",
         summary_ko=combined_meta.get("ko_log_summary"),
+        run_id=run_id,
     )
 
     return combined_meta
@@ -996,7 +1005,7 @@ def _validate_backlog(data: dict) -> list:
 # Phase 5: Technical Production
 # ---------------------------------------------------------------------------
 
-def run_technical_production() -> None:
+def run_technical_production(run_id: str = "") -> None:
     """Phase 5: Technical Production
 
     Reads blueprint.md, founder_summary.md, feature_spec.md.
@@ -1017,7 +1026,7 @@ def run_technical_production() -> None:
 
     tech_gen_model = os.getenv("OPENROUTER_MODEL_TECH_GEN", "tech_gen_model")
     tech_review_model = os.getenv("OPENROUTER_MODEL_TECH_REVIEW", "tech_review_model")
-    log_pm_audit_event("TechnicalProd", "START", model=f"{tech_gen_model},{tech_review_model}")
+    log_pm_audit_event("TechnicalProd", "START", model=f"{tech_gen_model},{tech_review_model}", run_id=run_id)
 
     context = (
         f"## Blueprint\n{blueprint}\n\n"
@@ -1092,6 +1101,7 @@ def run_technical_production() -> None:
         "TechnicalProd", "END",
         output="current/tech/backlog.json,current/tech/handoff_to_dev.json",
         summary_ko=review_result.get("ko_log_summary"),
+        run_id=run_id,
     )
 
 
@@ -1612,7 +1622,7 @@ def run_consistency_guardrail(
     return result
 
 
-def run_final_validation_and_patch() -> tuple:
+def run_final_validation_and_patch(run_id: str = "") -> tuple:
     """Validate handoff_to_dev.json and patch if needed.
 
     Runs up to 3 validate attempts and up to 2 patch crew calls.
@@ -1637,6 +1647,7 @@ def run_final_validation_and_patch() -> tuple:
             log_validation_error(
                 "handoff_to_dev.json", err, "Schema mismatch",
                 attempts, error_code="SCHEMA_MISMATCH",
+                run_id=run_id, phase="FinalValidation",
             )
 
         if attempts < max_retries:
@@ -1666,9 +1677,12 @@ def run_planning():
      14. create_archive_snapshot()
     """
     run_id = str(uuid.uuid4())
-    log_pm_audit_event("Workflow", "START")
-    log_reasoning_event(run_id=run_id, phase="Workflow", event_type="critique_generated",
-                        artifact="run_start", details={"run_id": run_id})
+    log_pm_audit_event("Workflow", "START", run_id=run_id)
+    log_reasoning_event(
+        run_id=run_id, phase="Workflow", event_type="run_start",
+        domain="workflow", category="lifecycle",
+        artifact="run_start", details={"run_id": run_id},
+    )
 
     # Load and verify founder kernel
     kernel_data = load_founder_kernel()
@@ -1689,10 +1703,10 @@ def run_planning():
         assert_kernel_integrity(kernel_data, "post-IdeaLoop")
 
         print("Phase 2: Synthesis")
-        run_synthesis()
+        run_synthesis(run_id=run_id)
 
         print("Phase 3: Decision")
-        run_decision(kernel_data=kernel_data)
+        run_decision(kernel_data=kernel_data, run_id=run_id)
         assert_kernel_integrity(kernel_data, "post-Decision")
 
         print("Phase v4-B6: Product QA Gate")
@@ -1727,18 +1741,18 @@ def run_planning():
             log_pm_audit(f"Workflow | DecisionCouncil verdict={council_verdict} — continuing in warn mode")
 
         print("Phase 4: Creative Production")
-        run_creative_production(kernel_data=kernel_data)
+        run_creative_production(kernel_data=kernel_data, run_id=run_id)
         assert_kernel_integrity(kernel_data, "post-CreativeProd")
 
         print("Phase 5: Technical Production")
-        run_technical_production()
+        run_technical_production(run_id=run_id)
 
         print("Phase 6: Final Validation + Patch")
-        ok, result = run_final_validation_and_patch()
+        ok, result = run_final_validation_and_patch(run_id=run_id)
         if not ok:
             print("Max retries reached. Auto-rejecting output.")
             log_pm_audit("Workflow failed: Max PATCH retries reached.")
-            log_run_summary(False, ["handoff_to_dev.json"], 0, 0, result["attempts"], 0)
+            log_run_summary(False, ["handoff_to_dev.json"], 0, 0, result["attempts"], 0, run_id=run_id)
             return {
                 "ok": False,
                 "risk": None,
@@ -1786,6 +1800,7 @@ def run_planning():
             risk,
             result.get("attempts", 0) if isinstance(result, dict) else 0,
             len(reasons),
+            run_id=run_id,
         )
         log_reasoning_event(
             run_id=run_id, phase="Workflow", event_type="council_approved",
@@ -1793,7 +1808,8 @@ def run_planning():
             details={"risk": risk, "council_verdict": council_verdict, "kernel_hash": kernel_hash[:12]},
             parent_event_id=workflow_event_id,
         )
-        log_pm_audit_event("Workflow", "END", risk=str(risk))
+        log_pm_audit_event("Workflow", "END", risk=str(risk), run_id=run_id)
+        generate_all_projections(run_id=run_id)
 
         return {
             "ok": True,
