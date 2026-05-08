@@ -4,6 +4,8 @@ import uuid
 import datetime
 from typing import Optional
 
+from harness.telemetry_schema import SCHEMA_VERSION
+
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs"))
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -29,7 +31,61 @@ def _fmt(**kwargs) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Technical logs (English / structured — no Korean translation)
+# Canonical stream — reasoning_trace.jsonl
+#
+# PRIMARY write target for all structured events (schema v1).
+# Append-only. One JSON object per line.
+# Supports causality chain via parent_event_id.
+#
+# domain/category taxonomy (declared by event, not inferred by projection):
+#   workflow/lifecycle | decision/selection | decision/tradeoff
+#   qa/validation | qa/patching | qa/integrity | qa/escalation | qa/consistency
+#   system/kernel | system/config | patch/repair | translation/sync
+# ---------------------------------------------------------------------------
+
+def log_reasoning_event(
+    run_id: str,
+    phase: str,
+    event_type: str,
+    artifact: Optional[str] = None,
+    details: Optional[dict] = None,
+    parent_event_id: Optional[str] = None,
+    domain: Optional[str] = None,
+    category: Optional[str] = None,
+    related_event_ids: Optional[list] = None,
+) -> str:
+    """Append one structured event to reasoning_trace.jsonl (canonical stream).
+
+    Returns event_id for causality chaining (pass as parent_event_id downstream).
+    The file is append-only and must never be truncated or rewritten.
+
+    domain/category embed event meaning per schema v1.
+    Defaults to workflow/lifecycle for legacy callers that omit them.
+    related_event_ids is reserved for future DAG lineage (default []).
+    """
+    event_id = str(uuid.uuid4())
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "parent_event_id": parent_event_id,
+        "related_event_ids": related_event_ids if related_event_ids is not None else [],
+        "run_id": run_id,
+        "phase": phase,
+        "domain": domain or "workflow",
+        "category": category or "lifecycle",
+        "event_type": event_type,
+        "artifact": artifact,
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "details": details or {},
+    }
+    line = json.dumps(record, ensure_ascii=False)
+    with open(os.path.join(LOG_DIR, "reasoning_trace.jsonl"), "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    return event_id
+
+
+# ---------------------------------------------------------------------------
+# Technical logs — run_summary.log
 # ---------------------------------------------------------------------------
 
 def log_run_summary(
@@ -39,6 +95,8 @@ def log_run_summary(
     risk_score: int,
     patch_attempts: int = 0,
     risk_reasons_count: int = 0,
+    run_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     status = "SUCCESS" if success else "FAILED"
     msg = (
@@ -47,6 +105,28 @@ def log_run_summary(
     )
     append_log("run_summary.log", msg)
 
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id,
+            phase="summary",
+            event_type="run_end",
+            domain="workflow",
+            category="lifecycle",
+            details={
+                "status": status,
+                "files": len(files),
+                "tasks": task_count,
+                "risk_score": risk_score,
+                "patch_attempts": patch_attempts,
+                "risk_reasons_count": risk_reasons_count,
+            },
+            parent_event_id=parent_event_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Technical logs — validation_failures.log
+# ---------------------------------------------------------------------------
 
 def log_validation_error(
     filename: str,
@@ -54,19 +134,54 @@ def log_validation_error(
     reason: str,
     attempt: int,
     error_code: str = "SCHEMA_MISMATCH",
+    run_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     msg = _fmt(File=filename, Path=path, Code=error_code, Reason=reason, Attempt=attempt)
     append_log("validation_failures.log", msg)
 
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase or "validation",
+            event_type="schema_mismatch",
+            domain="qa",
+            category="validation",
+            artifact=filename,
+            details={"path": path, "reason": reason, "attempt": attempt, "error_code": error_code},
+            parent_event_id=parent_event_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Technical logs — patch_actions.log
+# ---------------------------------------------------------------------------
 
 def log_patch_action(
     filename: str,
     patch_target: str,
     result: str,
     error_code: str = "PATCH_ATTEMPT",
+    run_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     msg = _fmt(File=filename, Target=patch_target, Code=error_code, Result=result)
     append_log("patch_actions.log", msg)
+
+    if run_id:
+        event_type = "patch_applied" if "success" in result.lower() else "patch_failed"
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase or "patching",
+            event_type=event_type,
+            domain="qa",
+            category="patching",
+            artifact=filename,
+            details={"patch_target": patch_target, "result": result, "error_code": error_code},
+            parent_event_id=parent_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -87,28 +202,37 @@ def log_pm_audit_event(
     risk: Optional[str] = None,
     output: Optional[str] = None,
     summary_ko: Optional[str] = None,
+    run_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
-    """Structured phase lifecycle event for pm_audit.log.
+    """Structured phase lifecycle event.
 
-    Typical use:
-        log_pm_audit_event("IdeaLoop", "START", model="gemini-2.5-flash,gpt-4o-mini")
-        log_pm_audit_event("IdeaLoop", "END",
-                           selected="task CRUD MVP",
-                           rejected="referral,billing",
-                           risk="auth scope unclear",
-                           summary_ko="핵심 기능은 CRUD 중심 MVP로 정리함")
+    Canonical emit (when run_id provided): domain=workflow, category=lifecycle.
+    Legacy text log (pm_audit.log) always written for compatibility.
     """
     msg = _fmt(
-        Phase=phase,
-        Status=status,
-        Model=model,
-        Selected=selected,
-        Rejected=rejected,
-        Risk=risk,
-        Output=output,
-        SummaryKo=summary_ko,
+        Phase=phase, Status=status, Model=model,
+        Selected=selected, Rejected=rejected,
+        Risk=risk, Output=output, SummaryKo=summary_ko,
     )
     append_log("pm_audit.log", msg)
+
+    if run_id:
+        event_type = "phase_start" if status.upper() == "START" else "phase_end"
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase,
+            event_type=event_type,
+            domain="workflow",
+            category="lifecycle",
+            artifact=output,
+            details={
+                "status": status, "model": model,
+                "selected": selected, "rejected": rejected,
+                "risk": risk, "summary_ko": summary_ko,
+            },
+            parent_event_id=parent_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -121,24 +245,27 @@ def log_decision_history(
     reason: Optional[str] = None,
     risk: Optional[str] = None,
     summary_ko: Optional[str] = None,
+    run_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     """Record a rejected option and its rationale.
 
-    Typical use:
-        log_decision_history("Synthesis",
-                             rejected="subscription billing",
-                             reason="non-MVP scope",
-                             risk="payment complexity",
-                             summary_ko="결제 기능은 MVP 범위 초과로 제외")
+    Canonical emit (when run_id provided): domain=decision, category=selection.
+    Legacy text log (decision_history.log) always written for compatibility.
     """
-    msg = _fmt(
-        Phase=phase,
-        Rejected=rejected,
-        Reason=reason,
-        Risk=risk,
-        SummaryKo=summary_ko,
-    )
+    msg = _fmt(Phase=phase, Rejected=rejected, Reason=reason, Risk=risk, SummaryKo=summary_ko)
     append_log("decision_history.log", msg)
+
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase,
+            event_type="option_rejected",
+            domain="decision",
+            category="selection",
+            details={"rejected": rejected, "reason": reason, "risk": risk, "summary_ko": summary_ko},
+            parent_event_id=parent_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -152,25 +279,33 @@ def log_blueprint_logic(
     trade_off: Optional[str] = None,
     reason: Optional[str] = None,
     summary_ko: Optional[str] = None,
+    run_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     """Record Decision-phase structural/technical choices.
 
-    Typical use:
-        log_blueprint_logic("Decision",
-                            selected="Supabase",
-                            rejected="Firebase",
-                            reason="faster MVP backend alignment",
-                            summary_ko="Supabase가 MVP 구현 속도 면에서 더 적합")
+    Canonical emit (when run_id provided): domain=decision, category=tradeoff.
+    Legacy text log (blueprint_logic.log) always written for compatibility.
     """
     msg = _fmt(
-        Phase=phase,
-        Selected=selected,
-        Rejected=rejected,
-        TradeOff=trade_off,
-        Reason=reason,
-        SummaryKo=summary_ko,
+        Phase=phase, Selected=selected, Rejected=rejected,
+        TradeOff=trade_off, Reason=reason, SummaryKo=summary_ko,
     )
     append_log("blueprint_logic.log", msg)
+
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase,
+            event_type="tradeoff_recorded",
+            domain="decision",
+            category="tradeoff",
+            details={
+                "selected": selected, "rejected": rejected,
+                "trade_off": trade_off, "reason": reason, "summary_ko": summary_ko,
+            },
+            parent_event_id=parent_event_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -183,69 +318,32 @@ def log_creative_process(
     rejected: Optional[str] = None,
     reason: Optional[str] = None,
     summary_ko: Optional[str] = None,
+    run_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
 ):
     """Record Creative Production narrative direction choices.
 
-    Typical use:
-        log_creative_process("CreativeProd",
-                             selected="clarity over feature breadth",
-                             summary_ko="기능 나열보다 핵심 사용 흐름 설명을 우선")
+    Canonical emit (when run_id provided): domain=decision, category=selection.
+    Legacy text log (creative_process.log) always written for compatibility.
     """
-    msg = _fmt(
-        Phase=phase,
-        Selected=selected,
-        Rejected=rejected,
-        Reason=reason,
-        SummaryKo=summary_ko,
-    )
+    msg = _fmt(Phase=phase, Selected=selected, Rejected=rejected, Reason=reason, SummaryKo=summary_ko)
     append_log("creative_process.log", msg)
 
+    if run_id:
+        log_reasoning_event(
+            run_id=run_id,
+            phase=phase,
+            event_type="option_selected",
+            domain="decision",
+            category="selection",
+            details={"selected": selected, "rejected": rejected, "reason": reason, "summary_ko": summary_ko},
+            parent_event_id=parent_event_id,
+        )
+
 
 # ---------------------------------------------------------------------------
-# Structured Decision Memory — reasoning_trace.jsonl
-#
-# Append-only, one JSON object per line.
-# Supports causality links via parent_event_id.
-# Query keys: run_id, phase, artifact, event_type
-#
-# Event types:
-#   critique_generated | conflict_detected | escalation_triggered
-#   founder_override | system_integrity_alert | validation_warning
-#   council_approved | council_rejected | kernel_hash_verified
-#   kernel_hash_mismatch | confidence_penalty_applied
+# Integrity / override events — reasoning_trace.jsonl only
 # ---------------------------------------------------------------------------
-
-def log_reasoning_event(
-    run_id: str,
-    phase: str,
-    event_type: str,
-    artifact: Optional[str] = None,
-    details: Optional[dict] = None,
-    parent_event_id: Optional[str] = None,
-) -> str:
-    """Append one structured reasoning event to reasoning_trace.jsonl.
-
-    Returns the generated event_id so the caller can pass it as
-    parent_event_id to downstream events (causality chain).
-
-    The file is append-only and must never be truncated or rewritten.
-    """
-    event_id = str(uuid.uuid4())
-    record = {
-        "event_id": event_id,
-        "parent_event_id": parent_event_id,
-        "run_id": run_id,
-        "phase": phase,
-        "event_type": event_type,
-        "artifact": artifact,
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-        "details": details or {},
-    }
-    line = json.dumps(record, ensure_ascii=False)
-    with open(os.path.join(LOG_DIR, "reasoning_trace.jsonl"), "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-    return event_id
-
 
 def log_system_integrity_alert(
     run_id: str,
@@ -254,15 +352,17 @@ def log_system_integrity_alert(
     source_ref: str,
     parent_event_id: Optional[str] = None,
 ) -> str:
-    """Record a fabricated founder evidence violation.
+    """Trust boundary breach (fabricated founder evidence).
 
-    This is classified as event_type='system_integrity_alert' and
-    triggers an immediate reject — NOT escalation.
+    domain=qa / category=integrity / event_type=system_integrity_alert.
+    Triggers immediate reject — NOT escalation.
     """
     return log_reasoning_event(
         run_id=run_id,
         phase=phase,
         event_type="system_integrity_alert",
+        domain="qa",
+        category="integrity",
         artifact="evidence_binding",
         details={
             "violation": "fabricated_founder_evidence",
@@ -281,11 +381,16 @@ def log_founder_override(
     override_details: Optional[dict] = None,
     parent_event_id: Optional[str] = None,
 ) -> str:
-    """Record a founder override event (AI average prevention)."""
+    """Founder override event (AI average prevention).
+
+    domain=system / category=kernel / event_type=founder_override.
+    """
     return log_reasoning_event(
         run_id=run_id,
         phase=phase,
         event_type="founder_override",
+        domain="system",
+        category="kernel",
         artifact="founder_kernel",
         details={"reason": reason, **(override_details or {})},
         parent_event_id=parent_event_id,
