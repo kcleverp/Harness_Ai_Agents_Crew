@@ -82,10 +82,19 @@ main.py
   └─ init_workspace()           # Creates dirs, auto-generates workspace/raw_ideas.md
   └─ validate_llm_env()         # Checks API key / URL / model — exits(1) on fail
   └─ run_planning()
-       ├─ Crew.kickoff()        # Hierarchical: PM Director manages Product PM + QA PM
-       ├─ validate_handoff()    # Pydantic schema check on handoff_to_dev.json
-       ├─ run_patch_crew()      # Partial patch retry (max 3 attempts)
-       ├─ calculate_risk()      # Risk score 0–100
+       ├─ load_founder_kernel()         # Load/create founder_kernel.json + hash
+       ├─ run_idea_loop()               # Kernel guard injected; structured critique JSON
+       ├─ run_synthesis()               # concept_checkpoint.json
+       ├─ run_decision()                # blueprint.md + kernel guard
+       ├─ run_product_qa_gate()         # Evidence binding, integrity alert, failure taxonomy
+       ├─ run_strategic_qa_gate()       # Founder preservation + market viability (optional)
+       ├─ run_decision_council()        # Approval + non-linear confidence clamp (optional)
+       ├─ run_creative_production()     # founder_summary.md, feature_spec.md + kernel guard
+       ├─ run_technical_production()    # backlog.json, handoff_to_dev.json
+       ├─ run_final_validation_and_patch() # Pydantic schema check + patch loop (max 3)
+       ├─ run_validation_strategy_engine() # KPI/hypothesis/failure modes (optional)
+       ├─ run_consistency_guardrail()   # Cross-document alignment (optional)
+       ├─ calculate_risk()              # Risk score 0–100
        └─ create_archive_snapshot()
 ```
 
@@ -96,15 +105,31 @@ main.py
 | Path | Description |
 |---|---|
 | `workspace/raw_ideas.md` | Input idea (auto-generated template on first run) |
-| `workspace/current/founder_summary.md` | MVP scope distilled by PM Director |
-| `workspace/current/feature_spec.md` | Feature specs and user stories |
-| `workspace/current/backlog.json` | Structured backlog |
-| `workspace/current/handoff_to_dev.json` | Final dev handoff (HandoffSchema) |
+| `workspace/founder_kernel.json` | Founder thesis kernel with hash |
+| `workspace/current/docs/founder_summary.md` | MVP scope distilled by PM Director |
+| `workspace/current/docs/founder_summary_ko.md` | Korean translation of founder summary |
+| `workspace/current/docs/feature_spec.md` | Feature specs and user stories |
+| `workspace/current/docs/concept_draft.md` | Initial concept draft |
+| `workspace/current/docs/concept_checkpoint.json` | Synthesized concept checkpoint |
+| `workspace/current/docs/blueprint.md` | Architecture and decision blueprint |
+| `workspace/current/tech/backlog.json` | Structured backlog |
+| `workspace/current/tech/handoff_to_dev.json` | Final dev handoff (HandoffSchema) |
+| `workspace/current/qa/product_qa_result.json` | Evidence binding + failure taxonomy |
+| `workspace/current/qa/strategic_qa_result.json` | Founder preservation + market viability |
+| `workspace/current/qa/consistency_result.json` | Cross-document alignment result |
+| `workspace/current/decision/council_decision.json` | Final approval + confidence penalties |
+| `workspace/current/validation/validation_strategy.json` | Hypothesis/KPI/failure mode structure |
 | `workspace/archive/<timestamp>_<tag>/` | Snapshot of current/ at run end |
 | `logs/pm_audit.log` | Workflow lifecycle events |
 | `logs/run_summary.log` | Per-run result summary (ok/risk/tasks/patches) |
 | `logs/validation_failures.log` | Schema validation errors with coordinates |
 | `logs/patch_actions.log` | Partial patch operations |
+| `logs/reasoning_trace.jsonl` | Canonical stream — append-only structured events (schema v1: domain/category/event_type) |
+| `logs/projections/runtime.log` | Derived: workflow lifecycle events (regenerable) |
+| `logs/projections/decisions.log` | Derived: decision/selection/tradeoff events (regenerable) |
+| `logs/projections/qa.log` | Derived: qa + system integrity events (regenerable) |
+| `logs/views/lineage_index.md` | View: chronological event lineage table (regenerable) |
+| `logs/views/pretty.log` | View: human-readable multiline event export (regenerable) |
 
 Archive tag: `todo_mvp` (risk < 70) or `high_risk_pending` (risk ≥ 70).
 
@@ -129,4 +154,117 @@ Result => ok=True risk=30 attempts=0 errors=0,
 - Phase 1: Scaffolding ✅
 - Phase 2: Harness implementation ✅
 - Phase 3: Workflow + Main ✅
-- Phase 4: Docs & verification ✅ (current)
+- Phase 4: Docs & verification ✅
+- Phase v4: Final Architecture v4 integration ✅
+  - Founder Intent Kernel (kernel_guard.py)
+  - Structured critique JSON + confidence scoring
+  - Product QA Gate with evidence integrity
+  - Strategic QA Gate (optional, warn mode)
+  - Decision Council with non-linear confidence clamp (optional)
+  - Validation Strategy Engine + failure scenarios (optional)
+  - Production Consistency Guardrail (optional)
+  - Structured Decision Memory (reasoning_trace.jsonl)
+- Phase v5: Forward Observability Refactor ✅
+  - Canonical event schema v1 (telemetry_schema.py)
+  - Canonical write path unified (audit_hooks.py)
+  - Telemetry projections: runtime / decisions / qa (telemetry_projection.py)
+  - Views: lineage_index / pretty (telemetry_projection.py)
+  - Deterministic reconstruction verification (verify_run_reconstruction)
+  - Transition compatibility mode + deprecation warnings
+
+---
+
+## Observability Architecture
+
+### Priority Guardrail
+
+```
+build quality  >  orchestration quality  >  observability sophistication
+```
+
+Observability infrastructure must never grow larger than the core system it serves.
+
+---
+
+### Log Layer Definitions
+
+| Layer | Files | Role | Immutable? |
+|---|---|---|---|
+| **Canonical** | `logs/reasoning_trace.jsonl` | Single source of truth. Append-only event stream. | Yes |
+| **Projections** | `logs/projections/runtime.log`<br>`logs/projections/decisions.log`<br>`logs/projections/qa.log` | Semantic slices from canonical. Regenerable. | No |
+| **Views** | `logs/views/lineage_index.md`<br>`logs/views/pretty.log` | Human-readable rendering. Regenerable. | No |
+| **Legacy** (transition) | `logs/pm_audit.log`<br>`logs/decision_history.log`<br>`logs/blueprint_logic.log`<br>`logs/creative_process.log`<br>`logs/patch_actions.log`<br>`logs/run_summary.log`<br>`logs/validation_failures.log` | Phase-centric logs. Kept during transition. **Deprecated.** | No |
+
+**Rule**: Event meaning is declared by the event itself via `domain/category/event_type`. Projections never infer meaning from phase names.
+
+---
+
+### Event Schema v1 — Required Fields
+
+```json
+{
+  "schema_version": "v1",
+  "event_id": "<uuid>",
+  "parent_event_id": "<uuid> | null",
+  "related_event_ids": [],
+  "run_id": "<uuid>",
+  "phase": "<phase_name>",
+  "domain": "workflow | decision | qa | system | patch | translation",
+  "category": "<category_within_domain>",
+  "event_type": "<specific_event_type>",
+  "artifact": "<filename> | null",
+  "timestamp": "<ISO-8601>",
+  "details": {}
+}
+```
+
+`related_event_ids` is reserved for future DAG lineage (default `[]`).
+
+---
+
+### Projection Regeneration Policy
+
+- Projections and views are **disposable**. Delete and regenerate at any time.
+- Canonical stream (`reasoning_trace.jsonl`) is **immutable** (append-only, never rewrite).
+- Regeneration is **deterministic**: same canonical input + same projection version → hash-equivalent output.
+- Regeneration triggers:
+  - Manual (operator command): `generate_all_projections(run_id=...)`
+  - Automatic: called at end of each `run_planning()` execution
+  - After schema/taxonomy change: regenerate full stream
+
+---
+
+### Replay Semantics
+
+Current stage: **replay-ready structure** — the canonical stream is sufficient to reconstruct all derived state.
+
+Reproducible from `reasoning_trace.jsonl`:
+- Event lineage rebuild
+- Projection rebuild (runtime / decisions / qa)
+- View rebuild (pretty / lineage_index)
+- Decision outcomes
+- QA outcomes
+- Artifact transition history
+
+**Out of scope** (future):
+- Real-time replay engine
+- Distributed event bus
+- Graph persistence
+
+**Future Direction**: event replayable orchestration — stateless phase functions that are fully reconstructable from the canonical event stream alone.
+
+---
+
+### Verification
+
+```python
+from harness.telemetry_projection import verify_run_reconstruction, generate_all_projections
+
+# Verify a specific run
+result = verify_run_reconstruction(run_id="<run_id>")
+print(result["ok"], result["anomalies"], result["hashes"])
+
+# Regenerate all projections
+generate_all_projections(run_id="<run_id>")   # single run
+generate_all_projections()                    # full stream
+```
