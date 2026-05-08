@@ -22,11 +22,5 @@ def create_archive_snapshot(custom_tag: str = None):
         snapshot_name = f"{ts}_run_{run_id:03d}"
         
     snapshot_path = os.path.join(ARCHIVE_DIR, snapshot_name)
-    os.makedirs(snapshot_path, exist_ok=True)
-    
-    for filename in os.listdir(CURRENT_DIR):
-        src = os.path.join(CURRENT_DIR, filename)
-        if os.path.isfile(src):
-            shutil.copy2(src, snapshot_path)
-            
+    shutil.copytree(CURRENT_DIR, snapshot_path)
     return snapshot_path
