@@ -1,19 +1,26 @@
 """
-telemetry_schema.py — Canonical event schema and domain taxonomy.
+telemetry_schema.py — Canonical event schema, domain taxonomy, and replay contract.
 
 Schema version: v1
 
-Design contract:
+═══════════════════════════════════════════════════════════════
+ DESIGN CONTRACT
+═══════════════════════════════════════════════════════════════
+
   - Event meaning is declared by the event itself via domain/category/event_type.
   - Projections read domain/category/event_type directly; they never infer meaning
-    from phase names.
+    from phase names or log file origins.
   - canonical stream (reasoning_trace.jsonl) is append-only and immutable.
   - schema_version is required on every event for forward-compatible projection logic.
   - related_event_ids is reserved (default []) for future DAG lineage.
 
-Domain taxonomy  (domain → category → event_type):
+═══════════════════════════════════════════════════════════════
+ DOMAIN TAXONOMY  (domain → category → event_type)
+═══════════════════════════════════════════════════════════════
+
   workflow   / lifecycle    → run_start, run_end, phase_start, phase_end, workflow_failed
-  decision   / selection    → option_selected, option_rejected, critique_generated, conflict_detected
+  decision   / selection    → option_selected, option_rejected, critique_generated,
+                              conflict_detected
              / tradeoff     → tradeoff_recorded, confidence_penalty_applied,
                               council_approved, council_rejected
   qa         / validation   → schema_mismatch, validation_warning, validation_passed
@@ -28,6 +35,71 @@ Domain taxonomy  (domain → category → event_type):
   patch      / repair       → partial_patch_applied, repair_failed
   translation/ sync         → translation_generated, translation_skipped,
                               translation_stale, translation_failed
+
+═══════════════════════════════════════════════════════════════
+ REPLAY SEMANTICS  (v1 — replay-ready structure)
+═══════════════════════════════════════════════════════════════
+
+Current stage: replay-ready.
+The canonical stream is sufficient to reconstruct all derived state deterministically.
+
+IN SCOPE (current):
+  canonical stream → lineage rebuild
+    All events sorted by (timestamp, event_id) reconstruct the full event lineage.
+
+  canonical stream → projection rebuild
+    runtime.log   : filter domain=workflow
+    decisions.log : filter domain=decision
+    qa.log        : filter domain=qa | domain=system
+
+  canonical stream → view rebuild
+    lineage_index.md : chronological table of all events
+    pretty.log       : human-readable multiline render
+
+  canonical stream → decision outcomes
+    Filter domain=decision, event_type in (option_selected, option_rejected,
+    council_approved, council_rejected) to reconstruct decision history.
+
+  canonical stream → QA outcomes
+    Filter domain=qa to reconstruct validation failures, patch actions,
+    integrity alerts, and escalations per run.
+
+  canonical stream → artifact transition history
+    Filter artifact field across all events to trace each file's lifecycle
+    (created → modified → validated → patched → archived).
+
+OUT OF SCOPE (future):
+  - Real-time replay engine
+  - Distributed event bus / streaming pipeline
+  - Graph persistence (Neo4j or similar)
+  - Stateful projection cache
+  - Temporal queries (e.g. "state at time T")
+
+REPLAY GUARANTEE:
+  For any run_id, verify_run_reconstruction(run_id) must return ok=True with
+  hash-stable projection outputs. Same canonical input → same hashes.
+  This is the minimum bar for "replay-ready" status.
+
+═══════════════════════════════════════════════════════════════
+ FUTURE DIRECTION: EVENT REPLAYABLE ORCHESTRATION
+═══════════════════════════════════════════════════════════════
+
+Target architecture (post-MVP):
+  Phase functions become stateless event emitters.
+  Workflow state is derived entirely from the canonical stream — not from files.
+  Any run can be replayed from its event stream to reproduce identical outputs.
+
+Migration path:
+  1. [DONE]  canonical stream as primary write target
+  2. [DONE]  domain/category/event_type event identity semantics
+  3. [DONE]  deterministic projection regeneration
+  4. [FUTURE] phase functions become pure: input events → output events
+  5. [FUTURE] workflow state machine driven by event stream
+  6. [FUTURE] full replay engine: stream → re-execute → compare outputs
+
+Priority guardrail:
+  build quality > orchestration quality > observability sophistication
+  Observability infrastructure must never exceed the core system in scope.
 """
 
 from __future__ import annotations
