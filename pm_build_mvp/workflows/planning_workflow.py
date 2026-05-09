@@ -1130,7 +1130,7 @@ def run_product_qa_gate(
     blueprint = read_workspace_file("current/docs/blueprint.md")
     llm = build_idea_critic_llm()  # cheap model — product QA is structural
 
-    log_pm_audit_event("ProductQA", "START")
+    log_pm_audit_event("ProductQA", "START", run_id=run_id)
 
     context = (
         f"## Concept Checkpoint\n{checkpoint_raw}\n\n"
@@ -1204,6 +1204,7 @@ def run_product_qa_gate(
         risk=overall,
         output="current/qa/product_qa_result.json",
         summary_ko=result.get("ko_summary"),
+        run_id=run_id,
     )
     return result
 
@@ -1279,7 +1280,7 @@ def run_strategic_qa_gate(
 
     blueprint = read_workspace_file("current/docs/blueprint.md")
     checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
-    log_pm_audit_event("StrategicQA", "START")
+    log_pm_audit_event("StrategicQA", "START", run_id=run_id)
 
     context = f"## Blueprint\n{blueprint}\n\n## Concept Checkpoint\n{checkpoint_raw}"
     if kernel_data:
@@ -1346,6 +1347,7 @@ def run_strategic_qa_gate(
         "StrategicQA", "END",
         risk="high_severity" if combined["has_high_severity"] else "none",
         output="current/qa/strategic_qa_result.json",
+        run_id=run_id,
     )
     return combined
 
@@ -1372,7 +1374,7 @@ def run_decision_council(
     checkpoint_raw = read_workspace_file("current/docs/concept_checkpoint.json")
     blueprint = read_workspace_file("current/docs/blueprint.md")
     strategic_qa_raw = read_workspace_file("current/qa/strategic_qa_result.json")
-    log_pm_audit_event("DecisionCouncil", "START")
+    log_pm_audit_event("DecisionCouncil", "START", run_id=run_id)
 
     try:
         strategic_qa = json.loads(strategic_qa_raw) if not strategic_qa_raw.startswith("Error:") else {}
@@ -1449,6 +1451,7 @@ def run_decision_council(
         log_decision_history(
             "DecisionCouncil", rejected=feat,
             reason="rejected by decision council",
+            run_id=run_id,
         )
 
     write_workspace_file(
@@ -1460,6 +1463,7 @@ def run_decision_council(
         selected=result.get("verdict"),
         output="current/decision/council_decision.json",
         summary_ko=result.get("ko_summary"),
+        run_id=run_id,
     )
     return result
 
@@ -1484,7 +1488,7 @@ def run_validation_strategy_engine(
 
     council_raw = read_workspace_file("current/decision/council_decision.json")
     blueprint = read_workspace_file("current/docs/blueprint.md")
-    log_pm_audit_event("ValidationEngine", "START")
+    log_pm_audit_event("ValidationEngine", "START", run_id=run_id)
 
     context = f"## Blueprint\n{blueprint}\n\n## Council Decision\n{council_raw}"
 
@@ -1530,6 +1534,7 @@ def run_validation_strategy_engine(
         "ValidationEngine", "END",
         output="current/validation/validation_strategy.json",
         summary_ko=val_result.get("ko_summary"),
+        run_id=run_id,
     )
     return val_result
 
@@ -1558,7 +1563,7 @@ def run_consistency_guardrail(
     backlog_raw = read_workspace_file("current/tech/backlog.json")
     validation_raw = read_workspace_file("current/validation/validation_strategy.json")
     founder_summary = read_workspace_file("current/docs/founder_summary.md")
-    log_pm_audit_event("ConsistencyGuardrail", "START")
+    log_pm_audit_event("ConsistencyGuardrail", "START", run_id=run_id)
 
     kernel_summary = ""
     if kernel_data:
@@ -1602,6 +1607,7 @@ def run_consistency_guardrail(
         risk=result.get("overall_status"),
         output="current/qa/consistency_result.json",
         summary_ko=result.get("ko_summary"),
+        run_id=run_id,
     )
     return result
 
@@ -1808,5 +1814,5 @@ def run_planning():
 
     finally:
         if not translation_checked:
-            ensure_founder_summary_korean()
+            ensure_founder_summary_korean(run_id=run_id)
 
