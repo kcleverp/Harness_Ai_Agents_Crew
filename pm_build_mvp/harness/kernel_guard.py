@@ -1,7 +1,7 @@
 """Founder Intent Kernel — loader, hash guard, and prompt injector.
 
 Responsibilities:
-- Load/create workspace/current/founder_kernel.json
+- Load/create workspace/founder_kernel.json
 - Compute and verify kernel hash across pipeline stages
 - Inject an immutable guard block at the top of system prompts
 
@@ -16,9 +16,10 @@ import hashlib
 import json
 import os
 
-from harness.safe_file_tools import read_workspace_file, write_workspace_file
+from harness.safe_file_tools import read_workspace_file, WORKSPACE_DIR
 
 _KERNEL_PATH = "founder_kernel.json"
+_KERNEL_ABS_PATH = os.path.join(WORKSPACE_DIR, _KERNEL_PATH)
 
 _KERNEL_TEMPLATE: dict = {
     "core_thesis": [],
@@ -99,17 +100,18 @@ def load_founder_kernel() -> dict:
 def _write_kernel(kernel_data: dict) -> None:
     payload = dict(kernel_data)
     payload["kernel_hash"] = _compute_hash(payload)
-    write_workspace_file(_KERNEL_PATH, json.dumps(payload, indent=2, ensure_ascii=False))
+    os.makedirs(os.path.dirname(_KERNEL_ABS_PATH), exist_ok=True)
+    with open(_KERNEL_ABS_PATH, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def save_founder_kernel(kernel_data: dict) -> str:
-    """Compute hash, persist to workspace, and return the hash."""
+    """Compute hash, persist to workspace/founder_kernel.json, and return the hash."""
     h = _compute_hash(kernel_data)
     kernel_data["kernel_hash"] = h
-    write_workspace_file(
-        _KERNEL_PATH,
-        json.dumps(kernel_data, indent=2, ensure_ascii=False),
-    )
+    os.makedirs(os.path.dirname(_KERNEL_ABS_PATH), exist_ok=True)
+    with open(_KERNEL_ABS_PATH, "w", encoding="utf-8") as f:
+        f.write(json.dumps(kernel_data, indent=2, ensure_ascii=False))
     return h
 
 
