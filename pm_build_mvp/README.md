@@ -101,7 +101,7 @@ OPENROUTER_MODEL_TECH_REVIEW=openai/gpt-4o-mini
 `llm_factory.validate_llm_env()` checks all 7 required role vars at startup and exits(1) on failure.
 Optional v4 roles (`STRATEGIC_QA`, `INVESTOR_QA`, `COUNCIL_*`, `VALIDATION`, `FAILURE_SCENARIO`, `CONSISTENCY`, `ESCALATION_*`) print a warning if unset; those phases are skipped.
 
-> **Note**: `OPENROUTER_MODEL` is a legacy var used only by `patch_engine.py`. Do not rely on it for new phase configuration. See `.env.example` for a full annotated template.
+> **Note**: `OPENROUTER_MODEL` is a fully deprecated legacy var. `patch_engine.py` now uses `OPENROUTER_MODEL_TECH_REVIEW`. Do not set or rely on `OPENROUTER_MODEL`. See `.env.example` for a full annotated template.
 
 ### 3. Run
 
@@ -155,9 +155,10 @@ main.py
 | `workspace/current/qa/product_qa_result.json` | Evidence binding + failure taxonomy |
 | `workspace/current/qa/strategic_qa_result.json` | Founder preservation + market viability |
 | `workspace/current/qa/consistency_result.json` | Cross-document alignment result |
+| `workspace/current/qa/escalation_result_{failure_type}.json` | Escalation model response per failure type (logic/spec/validation/semantic) |
 | `workspace/current/decision/council_decision.json` | Final approval + confidence penalties |
 | `workspace/current/validation/validation_strategy.json` | Hypothesis/KPI/failure mode structure |
-| `workspace/archive/<timestamp>_<tag>/` | Snapshot of current/ at run end |
+| `workspace/archive/<YYYY-MM-DD_HHMMss>_<tag>_<run_id[:8]>/` | Snapshot of current/ at run end |
 | `logs/pm_audit.log` | Workflow lifecycle events |
 | `logs/run_summary.log` | Per-run result summary (ok/risk/tasks/patches) |
 | `logs/validation_failures.log` | Schema validation errors with coordinates |
@@ -169,20 +170,20 @@ main.py
 | `logs/views/lineage_index.md` | View: chronological event lineage table (regenerable) |
 | `logs/views/pretty.log` | View: human-readable multiline event export (regenerable) |
 
-Archive tag: `todo_mvp` (risk < 70) or `high_risk_pending` (risk ≥ 70).
+Archive tag: `todo_mvp` (risk < 70, consistency pass/skipped) or `high_risk_pending` (risk ≥ 70 or ConsistencyGuardrail fail).
 
 ---
 
 ## Terminal Output (success)
 
 ```
-Initializing PM CrewAI System (Hierarchical Mode)...
+Initializing PM Planning System (Phase-based Mode)...
 Starting Planning Workflow...
 Schema Validation Passed.
 Risk Level Acceptable (30).
-Archived to workspace/archive/2026-05-01_0342_todo_mvp
+Archived to workspace/archive/2026-05-01_034215_todo_mvp_a3f7c1d2
 Workflow finished.
-Result => ok=True risk=30 attempts=0 errors=0,
+Result => ok=True risk=30 attempts=0 errors=0 risk_reasons=0 consistency=pass,
 ```
 
 ---
