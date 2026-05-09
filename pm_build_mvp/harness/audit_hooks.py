@@ -5,7 +5,7 @@ import datetime
 import warnings
 from typing import Optional
 
-from harness.telemetry_schema import SCHEMA_VERSION
+from harness.telemetry_schema import SCHEMA_VERSION, validate_event, SchemaValidationError
 
 # ---------------------------------------------------------------------------
 # Transition compatibility policy
@@ -99,6 +99,13 @@ def log_reasoning_event(
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
         "details": details or {},
     }
+    try:
+        validate_event(record)
+    except SchemaValidationError as schema_err:
+        warnings.warn(
+            f"Telemetry schema violation (event will still be written): {schema_err}",
+            stacklevel=2,
+        )
     line = json.dumps(record, ensure_ascii=False)
     with open(os.path.join(LOG_DIR, "reasoning_trace.jsonl"), "a", encoding="utf-8") as f:
         f.write(line + "\n")

@@ -77,6 +77,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from typing import Optional
 
 from harness.telemetry_schema import is_valid_event
@@ -97,18 +98,22 @@ def _ensure_dirs() -> None:
 
 
 def _load_events(run_id: Optional[str] = None) -> list[dict]:
-    """Load events from canonical stream. Skips malformed lines silently."""
+    """Load events from canonical stream. Skips and warns on malformed lines."""
     if not os.path.exists(_CANONICAL):
         return []
     events: list[dict] = []
     with open(_CANONICAL, "r", encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 ev = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                warnings.warn(
+                    f"reasoning_trace.jsonl line {lineno}: malformed JSON skipped — {exc}",
+                    stacklevel=2,
+                )
                 continue
             if run_id is None or ev.get("run_id") == run_id:
                 events.append(ev)
