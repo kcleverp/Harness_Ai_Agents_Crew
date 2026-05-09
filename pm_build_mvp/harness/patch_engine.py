@@ -44,12 +44,13 @@ def run_patch_crew(file_path: str, errors: list, run_id: str = ""):
     
     crew = Crew(agents=[patch_agent], tasks=[patch_task])
     result = crew.kickoff()
-    
+
+    result_str = str(result) if result is not None else "no_result"
     for error in errors:
         log_patch_action(
-            file_path, error, "Triggered Partial Patch Engine",
+            file_path, error, result_str,
             error_code="SCHEMA_PATCH_TRIGGER",
             run_id=run_id, phase="PatchEngine",
         )
-        
+
     return result

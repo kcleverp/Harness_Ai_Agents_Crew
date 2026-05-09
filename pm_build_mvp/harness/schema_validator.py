@@ -1,3 +1,7 @@
+# NOTE: Hard schema validation (raises on failure, triggers patch loop).
+# Soft structural validation (warn-only) lives in
+# workflows/planning_workflow.py (_validate_backlog). Keep enum values and
+# required field rules in sync between these two locations when modifying either.
 import json
 from pydantic import BaseModel, ValidationError, Field
 from typing import List, Literal

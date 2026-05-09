@@ -535,6 +535,9 @@ def run_creative_production(kernel_data: dict | None = None, run_id: str = "") -
 
 # ---------------------------------------------------------------------------
 # Phase 5 helper: backlog structural validation
+# NOTE: Soft validation (warn-only). Hard schema validation lives in
+# harness/schema_validator.py (HandoffSchema). Keep enum values and required
+# field rules in sync between these two locations when modifying either.
 # ---------------------------------------------------------------------------
 
 _VALID_OWNER = frozenset({"frontend", "backend", "fullstack", "qa"})
@@ -1404,12 +1407,6 @@ def run_planning():
             result.get("attempts", 0) if isinstance(result, dict) else 0,
             len(reasons),
             run_id=run_id,
-        )
-        log_reasoning_event(
-            run_id=run_id, phase="Workflow", event_type="council_approved",
-            artifact="run_complete",
-            details={"risk": risk, "council_verdict": council_verdict, "kernel_hash": kernel_hash[:12]},
-            parent_event_id=workflow_event_id,
         )
         log_pm_audit_event("Workflow", "END", risk=str(risk), run_id=run_id)
         generate_all_projections(run_id=run_id)
