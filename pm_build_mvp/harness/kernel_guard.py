@@ -17,6 +17,7 @@ import json
 import os
 
 from harness.safe_file_tools import read_workspace_file, WORKSPACE_DIR
+from harness.prompt_loader import load_prompt
 
 _KERNEL_PATH = "founder_kernel.json"
 _KERNEL_ABS_PATH = os.path.join(WORKSPACE_DIR, _KERNEL_PATH)
@@ -29,24 +30,8 @@ _KERNEL_TEMPLATE: dict = {
     "kernel_hash": "",
 }
 
-_GUARD_HEADER = """\
-[Inviolable Founder Kernel]
-
-You MUST preserve every item in this section verbatim.
-
-You are STRICTLY PROHIBITED from:
-- summarizing any kernel item
-- reinterpreting any kernel item
-- optimizing any kernel item
-- generalizing any kernel item
-- softening any kernel item
-- expanding any kernel item
-
-Any output that violates the above constraints is invalid and must be discarded.
-
-"""
-
-_GUARD_FOOTER = "\n[End Inviolable Founder Kernel]\n\n"
+_GUARD_HEADER = load_prompt("kernel_guard_header")
+_GUARD_FOOTER = load_prompt("kernel_guard_footer")
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import os
+import shutil
 from dotenv import load_dotenv
 from workflows.planning_workflow import run_planning
 from harness.llm_factory import validate_llm_env
@@ -16,21 +17,8 @@ def init_workspace():
         
     raw_ideas_path = os.path.join("workspace", "raw_ideas.md")
     if not os.path.exists(raw_ideas_path):
-        sample_idea = """# App Idea: Simple To-Do App (MVP)
-I want to build a simple task management app to track my daily goals.
-Core needs:
-- Users can create a task with a title and optional notes.
-- Users can edit existing tasks.
-- Users can mark a task as completed.
-- Users can delete tasks.
-- A view to filter tasks by 'All', 'Active', and 'Completed'.
-- I'd like a referral system where users can invite friends to get premium themes.
-- Maybe a subscription payment module for Pro features.
-
-Let's keep it quick to build. I want to use Supabase because I know the Python client SDK.
-Platform: Web for now, maybe Mobile later."""
-        with open(raw_ideas_path, "w", encoding="utf-8") as f:
-            f.write(sample_idea)
+        sample_path = os.path.join(os.path.dirname(__file__), "templates", "raw_ideas.sample.md")
+        shutil.copy2(sample_path, raw_ideas_path)
         print(f"Created initial template: {raw_ideas_path}")
 
 if __name__ == "__main__":
