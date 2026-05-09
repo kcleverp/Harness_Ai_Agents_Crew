@@ -14,7 +14,7 @@ pm_build_mvp/
 ├── config.json                      # Project configuration reference
 ├── requirements.txt                 # Python dependencies
 ├── personas/
-│   ├── translator.md                # Translator persona (runtime-loaded by translator_runner.py)
+│   ├── translator.md                # [reference only — content moved to prompts/translator_system.md]
 │   ├── pm_director.md               # [reference only — not runtime-loaded]
 │   ├── product_pm.md                # [reference only — not runtime-loaded]
 │   └── qa_pm.md                     # [reference only — not runtime-loaded]
@@ -39,7 +39,8 @@ pm_build_mvp/
 │   ├── escalation_system.md         # Escalation routing
 │   ├── kernel_guard_header.md       # Kernel guard prefix
 │   ├── kernel_guard_footer.md       # Kernel guard suffix
-│   └── patch_agent.md               # Patch crew agent meta
+│   ├── patch_agent.md               # Patch crew agent meta
+│   └── translator_system.md         # Post-process Korean translator
 ├── templates/
 │   ├── raw_ideas.sample.md          # Sample idea (auto-copied on first run)
 │   └── patch_task_description.template.md  # Patch task template
@@ -54,7 +55,7 @@ pm_build_mvp/
 │   ├── dev_exporter.py              # workspace/current → archive snapshot
 │   ├── patch_engine.py              # CrewAI partial JSON patch crew
 │   ├── kernel_guard.py              # Founder Kernel loader, hash guard, prompt injector
-│   ├── translator_runner.py         # Post-process Korean translation (personas/translator.md)
+│   ├── translator_runner.py         # Post-process Korean translation (prompts/translator_system.md)
 │   └── risk_engine.py               # Risk score calculator
 ├── workspace/
 │   ├── raw_ideas.md                 # (auto-created on first run) Idea input

@@ -10,6 +10,7 @@ import re
 
 from harness.audit_hooks import log_pm_audit, log_reasoning_event
 from harness.llm_factory import build_translator_llm_from_env
+from harness.prompt_loader import load_prompt
 from harness.safe_file_tools import read_workspace_file, write_workspace_file
 
 _EN_PATH = "current/docs/founder_summary.md"
@@ -138,7 +139,7 @@ def run_translator(en_content: str, run_id: str = "") -> None:
     Does NOT use a Crew — single direct LLM call.
     Never touches founder_summary.md.
     """
-    persona = _load_persona()
+    persona = load_prompt("translator_system")
     llm = build_translator_llm_from_env()
 
     messages = [
@@ -239,12 +240,4 @@ def _workspace_dir() -> str:
 
 def _read_abs(abs_path: str) -> str:
     with open(abs_path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def _load_persona() -> str:
-    persona_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../personas/translator.md")
-    )
-    with open(persona_path, "r", encoding="utf-8") as f:
         return f.read()
