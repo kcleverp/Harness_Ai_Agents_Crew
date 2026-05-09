@@ -11,8 +11,6 @@
 # =============================================================
 __pycache__/
 *.py[cod]
-*.pyd
-*.pyo
 *.so
 
 # virtual environments
@@ -55,18 +53,19 @@ pm_build_mvp/workspace/archive/*
 
 # legacy_run 전체 제외
 pm_build_mvp/workspace/legacy_run/
+
+# 로컬 입력·커널 (샘플: pm_build_mvp/templates/raw_ideas.sample.md)
+pm_build_mvp/workspace/raw_ideas.md
+pm_build_mvp/workspace/founder_kernel.json
 # =============================================================
 # LOGS
 # 실행 로그는 로컬 전용 — .gitkeep 으로 디렉토리만 추적
+# (projections/, views/ 등 하위 폴더 포함 전부 무시)
 # =============================================================
-pm_build_mvp/logs/*.log
-pm_build_mvp/logs/*.jsonl
-pm_build_mvp/logs/*.txt
-
-# =============================================================
-# TRANSLATOR SIDECAR (staleness hash, 필요 시 생성됨)
-# =============================================================
-pm_build_mvp/workspace/current/.founder_summary.en.sha256
+pm_build_mvp/logs/**
+!pm_build_mvp/logs/.gitkeep
+!pm_build_mvp/logs/**/
+!pm_build_mvp/logs/**/.gitkeep
 
 # =============================================================
 # OS ARTIFACTS
@@ -90,3 +89,8 @@ ehthumbs.db
 # 개인 설정은 추적하지 않음 (팀 공유 규칙은 .cursor/rules/ 에서 별도 관리)
 # =============================================================
 .cursor/mcp.json
+
+### 이미 placeholder로 커밋되었고 크루 운영시마다 변경되는 idea와 kernel
+pm_build_mvp/workspace/raw_ideas.md
+pm_build_mvp/workspace/founder_kernel.json
+
