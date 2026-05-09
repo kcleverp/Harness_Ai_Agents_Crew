@@ -6,18 +6,20 @@ from harness.prompt_loader import validate_prompt_files, WORKFLOW_REQUIRED_PROMP
 
 load_dotenv()
 
+_BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
 def init_workspace():
-    dirs =[
-        "workspace/current",
-        "workspace/archive",
-        "logs"
+    dirs = [
+        os.path.join(_BASE_DIR, "workspace", "current"),
+        os.path.join(_BASE_DIR, "workspace", "archive"),
+        os.path.join(_BASE_DIR, "logs"),
     ]
     for d in dirs:
         os.makedirs(d, exist_ok=True)
-        
-    raw_ideas_path = os.path.join("workspace", "raw_ideas.md")
+
+    raw_ideas_path = os.path.join(_BASE_DIR, "workspace", "raw_ideas.md")
     if not os.path.exists(raw_ideas_path):
-        sample_path = os.path.join(os.path.dirname(__file__), "templates", "raw_ideas.sample.md")
+        sample_path = os.path.join(_BASE_DIR, "templates", "raw_ideas.sample.md")
         shutil.copy2(sample_path, raw_ideas_path)
         print(f"Created initial template: {raw_ideas_path}")
 
