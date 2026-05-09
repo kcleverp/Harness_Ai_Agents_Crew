@@ -3,6 +3,7 @@ import json
 import re
 import uuid
 from crewai import Agent, Task, Crew, Process
+from harness.prompt_loader import load_prompt
 from harness.safe_file_tools import safe_read, safe_write, read_workspace_file, write_workspace_file
 from harness.schema_validator import validate_handoff, HandoffSchema
 from harness.risk_engine import calculate_risk
@@ -31,101 +32,14 @@ from harness.llm_factory import (
 from harness.translator_runner import ensure_founder_summary_korean
 from harness.telemetry_projection import generate_all_projections
 
-def load_persona(filename):
-    with open(os.path.join(os.path.dirname(__file__), f"../personas/{filename}"), "r", encoding="utf-8") as f:
-        return f.read()
-
-
 # ---------------------------------------------------------------------------
-# Phase system prompts
+# Phase system prompts — loaded from prompts/*.md at import time
 # ---------------------------------------------------------------------------
 
-_IDEA_GEN_SYSTEM = """\
-You are a lean startup idea analyst.
-Expand a raw app idea into a clear MVP concept.
-
-Output rules:
-- 300-400 words maximum.
-- Use exactly these headings (no others, no extra sections):
-  # Problem
-  # Target User
-  # Core Value
-  # Proposed MVP Scope
-  # Excluded Ideas
-  # Risks
-  # Open Questions
-- After the document body, append this block on its own lines (fill in every field):
-  <!-- LOG_META
-  {"selected_core": "<one-line core feature>", "rejected_features": ["feat1", "feat2"], "risks": ["risk1"], "ko_log_summary": "<1-2 sentence Korean summary of what was kept and excluded>"}
-  LOG_META -->
-- MVP only. Cut everything that is not essential for a first launch.\
-"""
-
-_IDEA_CRITIQUE_SYSTEM = """\
-You are a strict MVP scope critic.
-Review the concept draft and output a JSON array of critique items.
-
-Output ONLY a valid JSON array. No markdown fences. No explanation. No other text.
-
-Each item must follow this schema exactly:
-{
-  "persona": "pm|ops|user|growth|finance",
-  "risk": "<specific risk or problem found>",
-  "confidence": <0.0 to 1.0>,
-  "confidence_basis": ["<reason 1>", "<reason 2>"],
-  "conflict_type": "scope_creep|contradiction|missing_risk|ux_vs_ops|growth_vs_scope|speed_vs_quality|priority_contradiction|none",
-  "suggested_fix": "<one-line fix or empty string>"
-}
-
-Rules:
-- Output 3 to 5 items maximum.
-- Flag only: scope creep, contradictions, missing risks, execution conflicts.
-- No praise. Problems only.
-- confidence_basis must contain at least 1 reason.
-- If no issues found, return an empty array: []\
-"""
-
-_IDEA_REVISE_SYSTEM = """\
-You are a lean startup idea analyst revising a concept draft.
-Apply the critique feedback to improve the draft.
-
-Output rules:
-- 300-400 words maximum.
-- Keep the same headings:
-  # Problem
-  # Target User
-  # Core Value
-  # Proposed MVP Scope
-  # Excluded Ideas
-  # Risks
-  # Open Questions
-- Append the LOG_META block at the end with updated values:
-  <!-- LOG_META
-  {"selected_core": "<one-line core feature>", "rejected_features": ["feat1", "feat2"], "risks": ["risk1"], "ko_log_summary": "<1-2 sentence Korean summary>"}
-  LOG_META -->
-- Do not add new features. Only address what the critique flagged.\
-"""
-
-_SYNTHESIS_SYSTEM = """\
-You are a product synthesis expert.
-Convert a concept draft into a structured JSON checkpoint.
-
-Output rules:
-- Output ONLY a valid JSON object. No markdown fences. No explanation. No other text.
-- Fill every field. Use [] for empty arrays. Never omit a key.
-
-Required schema:
-{
-  "problem": "",
-  "target_user": "",
-  "core_value": "",
-  "must_have_mvp": [],
-  "excluded_features": [],
-  "key_risks": [],
-  "open_questions": [],
-  "recommended_direction": ""
-}\
-"""
+_IDEA_GEN_SYSTEM = load_prompt("idea_gen_system")
+_IDEA_CRITIQUE_SYSTEM = load_prompt("idea_critique_system")
+_IDEA_REVISE_SYSTEM = load_prompt("idea_revise_system")
+_SYNTHESIS_SYSTEM = load_prompt("synthesis_system")
 
 _CHECKPOINT_REQUIRED_KEYS = frozenset({
     "problem", "target_user", "core_value",
@@ -133,381 +47,21 @@ _CHECKPOINT_REQUIRED_KEYS = frozenset({
     "open_questions", "recommended_direction",
 })
 
-_DECISION_SYSTEM = """\
-You are a senior product architect making definitive MVP decisions.
+_DECISION_SYSTEM = load_prompt("decision_system")
+_FOUNDER_SUMMARY_SYSTEM = load_prompt("founder_summary_system")
+_FEATURE_SPEC_SYSTEM = load_prompt("feature_spec_system")
+_TECH_GEN_SYSTEM = load_prompt("tech_gen_system")
+_TECH_REVIEW_SYSTEM = load_prompt("tech_review_system")
+_TECH_REVISE_SYSTEM = load_prompt("tech_revise_system")
 
-Given a concept checkpoint, produce a blueprint document.
-
-Output format:
-1. Write the blueprint in Markdown with EXACTLY these headings (no others):
-   # Product Direction
-   # MVP Boundary
-   # Core User Flow
-   # Tech Stack Decision
-   # Data / Backend Notes
-   # Rejected Options
-   # Trade-offs
-   # Risks
-   # Build Order
-
-2. After the document, append this metadata block:
-   <!-- DECISION_META
-   {"selected_decisions": ["decision1"], "trade_offs": ["tradeoff1"], "reasons": ["reason1"], "rejected_options": ["option1", "option2"], "ko_log_summary": "<1-2 sentence Korean summary of the key decisions made>"}
-   DECISION_META -->
-
-Rules:
-- Be decisive. No "TBD" or "depends on context".
-- Tech Stack Decision must name specific tools with a one-line justification each.
-- Rejected Options must list at least 2 alternatives that were considered.
-- Trade-offs must state what was sacrificed and why it was acceptable.
-- Keep document concise: 400-600 words max.\
-"""
-
-_FOUNDER_SUMMARY_SYSTEM = """\
-You are a product writer creating a concise founder-level summary.
-
-Given a blueprint, write the founder summary.
-
-Output format:
-Markdown with EXACTLY these headings (no others):
-# One-line Product
-# Who It Is For
-# Problem
-# MVP Scope
-# What Is Explicitly Out
-# Why This Scope First
-
-After the document, append:
-<!-- CREATIVE_META
-{"narrative_focus": "<what angle was emphasized>", "rejected_framings": ["framing1"], "ko_log_summary": "<1-2 sentence Korean summary>"}
-CREATIVE_META -->
-
-Rules:
-- "One-line Product": one sentence, 15 words max.
-- "MVP Scope": bullet list of 3-5 items only.
-- "What Is Explicitly Out": bullet list, each item specific and unambiguous.
-- No marketing language. Clarity over persuasion.
-- 250-350 words total.\
-"""
-
-_FEATURE_SPEC_SYSTEM = """\
-You are a senior product manager writing a feature specification.
-
-Given a blueprint and founder summary, write the feature spec.
-
-Output format:
-Markdown with EXACTLY these headings (no others):
-# Primary User Stories
-# End-to-End User Flow
-# Feature Breakdown
-# Acceptance Boundaries
-# Non-goals
-# Open Product Risks
-
-After the document, append:
-<!-- CREATIVE_META
-{"narrative_focus": "<what angle was emphasized>", "rejected_framings": ["framing1"], "ko_log_summary": "<1-2 sentence Korean summary>"}
-CREATIVE_META -->
-
-Rules:
-- "Primary User Stories": "As a [user], I want [action] so that [outcome]" format, 3-5 stories.
-- "End-to-End User Flow": numbered steps, 5-8 steps.
-- "Feature Breakdown": one sub-heading per feature, 2-3 acceptance criteria each.
-- "Non-goals": explicit list of what this spec does NOT cover.
-- No tech stack details. Product language only.
-- 400-500 words total.\
-"""
-
-_TECH_GEN_SYSTEM = """\
-You are a technical product manager generating structured JSON artifacts.
-
-Generate both a backlog and a dev handoff JSON from the provided context.
-
-Output ONLY a valid JSON object with EXACTLY this structure. No markdown. No explanation.
-{
-  "backlog": {
-    "tasks": []
-  },
-  "handoff": {
-    "project_name": "",
-    "objective": "",
-    "target_platform": "web",
-    "tech_stack": {
-      "status": "proposed",
-      "frontend": [],
-      "backend": [],
-      "database": [],
-      "infra": [],
-      "notes": ""
-    },
-    "tasks": []
-  }
-}
-
-Task schema (identical for backlog.tasks and handoff.tasks):
-{
-  "id": "TASK-01",
-  "title": "",
-  "owner": "frontend",
-  "priority": "high",
-  "dependencies": [],
-  "acceptance_criteria": [],
-  "files_to_create": [],
-  "files_to_modify": [],
-  "notes": ""
-}
-
-Enum constraints:
-- owner: frontend | backend | fullstack | qa
-- priority: high | medium | low
-- target_platform: web | mobile | api | desktop
-- tech_stack.status: proposed | pending | locked
-
-Rules:
-- Include 4-8 tasks total. No placeholder tasks.
-- Every task must have at least 2 acceptance_criteria.
-- Task title must be specific and actionable (no vague wording).
-- dependencies must reference only existing task IDs in this same list.
-- No circular dependencies.
-- Do not assign >80% of tasks to one owner when total tasks >= 5.
-- backlog.tasks and handoff.tasks must be identical.\
-"""
-
-_TECH_REVIEW_SYSTEM = """\
-You are a strict JSON schema reviewer for development task artifacts.
-
-Review the generated JSON and identify all issues.
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-{
-  "issues": ["issue description"],
-  "fix_requests": ["exact fix instruction"],
-  "ko_log_summary": "<1-2 sentence Korean summary of main issues found>"
-}
-
-Check for:
-1. Schema: all required fields present, correct types
-2. Enum values: owner (frontend/backend/fullstack/qa), priority (high/medium/low),
-   target_platform (web/mobile/api/desktop), tech_stack.status (proposed/pending/locked)
-3. Task completeness: acceptance_criteria >= 2, titles specific and actionable
-4. Dependency integrity: no undefined IDs, no circular dependencies
-5. Ownership: not >80% on one owner when task_count >= 5
-6. backlog.tasks and handoff.tasks must be identical
-
-If no issues found:
-{"issues": [], "fix_requests": [], "ko_log_summary": "모든 항목 유효함"}\
-"""
-
-_TECH_REVISE_SYSTEM = """\
-You are a technical product manager fixing JSON artifacts based on reviewer feedback.
-
-Apply every fix request exactly. Output ONLY the corrected JSON. No markdown. No explanation.
-
-Keep the same top-level structure:
-{"backlog": {"tasks": [...]}, "handoff": {"project_name": "", ...}}
-
-Rules:
-- Apply every fix request listed.
-- Keep tasks that were not flagged as issues.
-- backlog.tasks and handoff.tasks must be identical after fixes.\
-"""
-
-# ---------------------------------------------------------------------------
 # v4 system prompts
-# ---------------------------------------------------------------------------
-
-_PRODUCT_QA_SYSTEM = """\
-You are a strict product QA reviewer.
-Perform structural and evidence validation on the provided concept checkpoint.
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "qa_results": [
-    {
-      "qa_type": "structural|spec|validation|semantic|priority_contradiction",
-      "passed": true,
-      "finding": "<description or empty string if passed>",
-      "severity": "none|warn|fail"
-    }
-  ],
-  "evidence_bindings": [
-    {
-      "claim": "<claim being validated>",
-      "evidence_type": "founder_conviction|market_observation|operational_assumption|user_research|unknown",
-      "source_ref": "<e.g. kernel.non_negotiables[0] or 'none'>",
-      "assumption": "<explicit assumption or empty string>",
-      "confidence": "high|medium|low|unverified"
-    }
-  ],
-  "overall_status": "pass|warn|fail",
-  "failure_type": "none|logic|spec|validation|semantic|priority_contradiction",
-  "ko_summary": "<1-2 sentence Korean summary>"
-}
-
-QA areas to check:
-1. Structural QA: logical consistency, no contradictions
-2. Spec QA: implementation feasibility, not vague
-3. Validation QA: hypotheses are measurable
-4. Semantic QA: cross-artifact terminology consistency
-5. Priority QA: no execution-level contradictions in must_have_mvp
-
-Evidence rules:
-- For every major claim in must_have_mvp, produce one evidence_binding.
-- If evidence_type is founder_conviction, source_ref MUST start with "kernel."
-- If you cannot find a real kernel reference, set source_ref to "none" and confidence to "unverified".\
-"""
-
-_STRATEGIC_QA_FOUNDER_SYSTEM = """\
-You are a founder thesis preservation reviewer.
-Your ONLY job is to check whether the product blueprint drifts from the founder kernel.
-
-You are STRICTLY PROHIBITED from:
-- suggesting new features
-- expanding scope
-- exploring alternatives
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "checks": [
-    {
-      "check_type": "thesis_drift|edge_dilution|generic_saasization|anti_pattern_violation",
-      "passed": true,
-      "finding": "<description or empty if passed>",
-      "severity": "none|warn|high"
-    }
-  ],
-  "overall_verdict": "preserved|warn|violated",
-  "ko_summary": "<1-2 sentence Korean summary>"
-}\
-"""
-
-_STRATEGIC_QA_INVESTOR_SYSTEM = """\
-You are a market viability analyst.
-Your ONLY job is to assess whether this MVP can survive in the market.
-
-You are STRICTLY PROHIBITED from:
-- suggesting new features
-- expanding scope
-- exploring alternatives
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "checks": [
-    {
-      "check_type": "market_survival|scalability|moat_weakness|demand_uncertainty",
-      "passed": true,
-      "finding": "<description or empty if passed>",
-      "severity": "none|warn|high"
-    }
-  ],
-  "overall_verdict": "viable|warn|not_viable",
-  "ko_summary": "<1-2 sentence Korean summary>"
-}\
-"""
-
-_DECISION_COUNCIL_SYSTEM = """\
-You are a senior product architect making the final MVP approval decision.
-
-Given a concept checkpoint and strategic QA results, produce the final council decision.
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "approved_mvp": ["<approved feature or direction>"],
-  "rejected_features": ["<rejected feature>"],
-  "tradeoffs": ["<explicit tradeoff accepted>"],
-  "confidence": {
-    "base_confidence": <0.0 to 1.0>,
-    "critical_penalties": [
-      {"source": "<source>", "severity": "high|medium|low", "penalty": <negative float>}
-    ],
-    "final_confidence": <0.0 to 1.0>
-  },
-  "confidence_penalties": ["<human-readable penalty explanation>"],
-  "blockers": ["<unresolved blocker or empty list if none>"],
-  "verdict": "approved|rejected|needs_revision",
-  "ko_summary": "<1-2 sentence Korean summary>"
-}
-
-Confidence rules:
-- base_confidence: your raw confidence before penalties
-- If any strategic QA check has severity "high", apply a penalty that brings final_confidence to <= 0.30
-- final_confidence = base_confidence + sum(penalties), clamped to [0.0, 1.0]
-- verdict must be "approved" only when final_confidence >= 0.50 AND blockers is empty\
-"""
-
-_VALIDATION_STRATEGY_SYSTEM = """\
-You are a product validation strategist.
-Generate a measurable validation structure for the approved MVP.
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "core_hypothesis": [
-    {
-      "id": "H-01",
-      "statement": "<hypothesis>",
-      "kpi": "<measurable KPI>",
-      "minimum_success_signal": "<minimum threshold to validate>",
-      "signal_latency": "immediate|short|medium|long",
-      "decision_impact": "high|medium|low"
-    }
-  ],
-  "failure_modes": [],
-  "counterfactuals": ["<what would invalidate this hypothesis>"],
-  "next_experiments": ["<first actionable experiment>"],
-  "ko_summary": "<1-2 sentence Korean summary>"
-}\
-"""
-
-_FAILURE_SCENARIO_SYSTEM = """\
-You are a failure scenario generator.
-Generate realistic collapse scenarios for the provided MVP concept.
-
-Output ONLY a valid JSON array. No markdown. No explanation.
-
-Each item:
-{
-  "scenario_id": "FS-01",
-  "failure_type": "no_show_cascade|abandonment|coordination_collapse|demand_miss|ops_breakdown",
-  "description": "<realistic failure description>",
-  "trigger": "<what causes this failure>",
-  "severity": "critical|high|medium",
-  "early_signal": "<observable early warning sign>"
-}
-
-Generate 3 to 5 scenarios. Focus on realistic, product-specific risks.\
-"""
-
-_CONSISTENCY_GUARDRAIL_SYSTEM = """\
-You are a cross-document semantic consistency checker.
-Check alignment between the provided artifacts.
-
-Output ONLY a valid JSON object. No markdown. No explanation.
-
-Required schema:
-{
-  "checks": [
-    {
-      "comparison": "spec_vs_backlog|validation_vs_kpi|validation_vs_spec|kernel_vs_outputs",
-      "passed": true,
-      "mismatch": "<description of mismatch or empty if passed>",
-      "severity": "none|warn|fail",
-      "auto_fixable": true
-    }
-  ],
-  "overall_status": "pass|warn|fail",
-  "ko_summary": "<1-2 sentence Korean summary>"
-}\
-"""
+_PRODUCT_QA_SYSTEM = load_prompt("product_qa_system")
+_STRATEGIC_QA_FOUNDER_SYSTEM = load_prompt("strategic_qa_founder_system")
+_STRATEGIC_QA_INVESTOR_SYSTEM = load_prompt("strategic_qa_investor_system")
+_DECISION_COUNCIL_SYSTEM = load_prompt("decision_council_system")
+_VALIDATION_STRATEGY_SYSTEM = load_prompt("validation_strategy_system")
+_FAILURE_SCENARIO_SYSTEM = load_prompt("failure_scenario_system")
+_CONSISTENCY_GUARDRAIL_SYSTEM = load_prompt("consistency_guardrail_system")
 
 
 # ---------------------------------------------------------------------------
@@ -1244,7 +798,7 @@ def _run_escalation_retry(
     try:
         llm = factory()
         llm.call([
-            {"role": "system", "content": "You are a specialist reviewer. Identify the root cause of the following QA failure and suggest a specific resolution."},
+            {"role": "system", "content": load_prompt("escalation_system")},
             {"role": "user", "content": f"Failure type: {failure_type}\n\nContext:\n{context}"},
         ])
         log_reasoning_event(
