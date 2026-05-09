@@ -1,7 +1,7 @@
 from crewai import Agent, Task, Crew
 from .safe_file_tools import safe_read, apply_partial_patch, read_workspace_file
 from .audit_hooks import log_patch_action
-from .llm_factory import build_llm_from_env
+from .llm_factory import build_technical_review_llm
 from .prompt_loader import load_prompt, load_template
 
 def _parse_agent_meta(text: str) -> dict:
@@ -17,7 +17,7 @@ def _parse_agent_meta(text: str) -> dict:
 def run_patch_crew(file_path: str, errors: list, run_id: str = ""):
     error_details = "\n".join(errors)
     founder_context = read_workspace_file("current/docs/founder_summary.md")
-    patch_llm = build_llm_from_env()
+    patch_llm = build_technical_review_llm()
 
     agent_meta = _parse_agent_meta(load_prompt("patch_agent"))
     task_description = load_template("patch_task_description.template.md").format(
