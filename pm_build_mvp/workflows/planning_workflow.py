@@ -1335,14 +1335,33 @@ def run_planning():
         run_validation_strategy_engine(run_id=run_id, parent_event_id=workflow_event_id)
 
         print("Phase v4-D10: Consistency Guardrail")
-        run_consistency_guardrail(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
+        consistency_result = run_consistency_guardrail(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
 
         risk_result = calculate_risk(handoff_dict)
         risk = risk_result["score"]
-        reasons = risk_result["reasons"]
+        reasons = list(risk_result["reasons"])
 
-        if risk >= 70:
-            print(f"HIGH RISK ({risk}): Founder Approval Required.")
+        # Consistency fail → add to risk reasons so it surfaces in the final result
+        consistency_status = consistency_result.get("overall_status", "skipped")
+        if consistency_status == "fail":
+            failed_checks = [
+                c.get("comparison", "unknown")
+                for c in consistency_result.get("checks", [])
+                if c.get("severity") == "fail"
+            ]
+            reasons.append(
+                f"ConsistencyGuardrail: cross-document mismatch detected — "
+                f"failed checks: {', '.join(failed_checks) if failed_checks else 'see consistency_result.json'}"
+            )
+            log_pm_audit(
+                f"ConsistencyGuardrail | Status=FAIL_REFLECTED | FailedChecks={failed_checks}"
+            )
+
+        if risk >= 70 or consistency_status == "fail":
+            if consistency_status == "fail":
+                print(f"Consistency FAIL: cross-document mismatch. Archiving as high_risk_pending.")
+            else:
+                print(f"HIGH RISK ({risk}): Founder Approval Required.")
             log_pm_audit(f"Workflow paused. High risk score: {risk}. reasons={reasons}")
             snapshot_tag = "high_risk_pending"
         else:
@@ -1389,6 +1408,7 @@ def run_planning():
             "council_verdict": council_verdict,
             "kernel_hash": kernel_hash,
             "run_id": run_id,
+            "consistency_status": consistency_status,
         }
 
     finally:

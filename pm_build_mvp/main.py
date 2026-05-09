@@ -49,5 +49,6 @@ if __name__ == "__main__":
         f"risk={output.get('risk')} "
         f"attempts={output.get('attempts')} "
         f"errors={len(output.get('errors', []))} "
-        f"risk_reasons={len(output.get('risk_reasons', []))},"
+        f"risk_reasons={len(output.get('risk_reasons', []))} "
+        f"consistency={output.get('consistency_status', 'skipped')},"
     )
