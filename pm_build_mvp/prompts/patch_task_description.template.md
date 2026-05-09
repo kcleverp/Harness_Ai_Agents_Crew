@@ -1,3 +1,5 @@
+<!-- DEPRECATED: use templates/patch_task_description.template.md. This file is unused at runtime. -->
+
 The file '{file_path}' failed Schema Validation.
 Exact errors found:
 {error_details}

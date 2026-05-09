@@ -233,6 +233,7 @@ Observability infrastructure must never grow larger than the core system it serv
 | **Projections** | `logs/projections/runtime.log`<br>`logs/projections/decisions.log`<br>`logs/projections/qa.log` | Semantic slices from canonical. Regenerable. | No |
 | **Views** | `logs/views/lineage_index.md`<br>`logs/views/pretty.log` | Human-readable rendering. Regenerable. | No |
 | **Legacy** (transition) | `logs/pm_audit.log`<br>`logs/decision_history.log`<br>`logs/blueprint_logic.log`<br>`logs/creative_process.log`<br>`logs/patch_actions.log`<br>`logs/run_summary.log`<br>`logs/validation_failures.log` | Phase-centric logs. Kept during transition. **Deprecated.** | No |
+| **Pre-v1 archive** | `logs/reasoning_trace.legacy_pre_v1.jsonl` | Preserved copy of events emitted before schema v1. Not subject to validation or projection. | — |
 
 **Rule**: Event meaning is declared by the event itself via `domain/category/event_type`. Projections never infer meaning from phase names.
 

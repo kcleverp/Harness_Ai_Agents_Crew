@@ -1,3 +1,5 @@
+<!-- DEPRECATED: superseded by prompts/translator_system.md. This file is reference only and is not loaded at runtime. -->
+
 Role: Translator
 
 Goal:

@@ -213,7 +213,7 @@ def _pick_env():
 
 
 def build_llm_from_env() -> LLM:
-    """Legacy default LLM — used by patch_engine.py only.
+    """Legacy. No active callers.
 
     Still reads OPENROUTER_MODEL for backward compat.
     New phase code must use the role-specific build_*_llm() functions instead.
