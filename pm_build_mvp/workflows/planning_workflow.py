@@ -580,6 +580,15 @@ def _strip_creative_meta(text: str) -> str:
     return re.sub(r'<!--\s*CREATIVE_META.*?CREATIVE_META\s*-->', '', text, flags=re.DOTALL).strip()
 
 
+def _parse_json_phase(raw: str, fallback: dict, phase_label: str) -> dict:
+    """Parse a JSON-only LLM response; log and return fallback on failure."""
+    try:
+        return json.loads(_clean_json_response(raw))
+    except (json.JSONDecodeError, ValueError):
+        log_pm_audit(f"{phase_label} | Status=PARSE_FAIL | falling back to default")
+        return dict(fallback)
+
+
 # ---------------------------------------------------------------------------
 # Phase 1: Idea Loop
 # ---------------------------------------------------------------------------
@@ -1046,12 +1055,7 @@ def run_technical_production(run_id: str = "") -> None:
         {"role": "system", "content": _TECH_REVIEW_SYSTEM},
         {"role": "user", "content": f"Review these JSON artifacts:\n\n{gen_cleaned}"},
     ])
-    review_cleaned = _clean_json_response(review_raw)
-
-    try:
-        review_result = json.loads(review_cleaned)
-    except json.JSONDecodeError:
-        review_result = {"issues": [], "fix_requests": [], "ko_log_summary": None}
+    review_result = _parse_json_phase(review_raw, {"issues": [], "fix_requests": [], "ko_log_summary": None}, "TechnicalProd.review")
 
     issues = review_result.get("issues", [])
     fix_requests = review_result.get("fix_requests", [])
@@ -1144,11 +1148,7 @@ def run_product_qa_gate(
         {"role": "user", "content": f"Run product QA on these artifacts:\n\n{context}"},
     ])
 
-    try:
-        result = json.loads(_clean_json_response(raw))
-    except (json.JSONDecodeError, ValueError):
-        log_pm_audit("ProductQA | Status=PARSE_FAIL | falling back to warn")
-        result = {"overall_status": "warn", "failure_type": "none", "qa_results": [], "evidence_bindings": []}
+    result = _parse_json_phase(raw, {"overall_status": "warn", "failure_type": "none", "qa_results": [], "evidence_bindings": []}, "ProductQA")
 
     # --- Evidence integrity validation ---
     integrity_violations = []
@@ -1295,10 +1295,7 @@ def run_strategic_qa_gate(
         {"role": "system", "content": _STRATEGIC_QA_FOUNDER_SYSTEM},
         {"role": "user", "content": f"Check founder thesis preservation:\n\n{context}"},
     ])
-    try:
-        founder_result = json.loads(_clean_json_response(founder_raw))
-    except (json.JSONDecodeError, ValueError):
-        founder_result = {"overall_verdict": "warn", "checks": []}
+    founder_result = _parse_json_phase(founder_raw, {"overall_verdict": "warn", "checks": []}, "StrategicQA.founder")
 
     # Market Viability Check (optional — needs investor model)
     investor_result = {"overall_verdict": "skipped", "checks": []}
@@ -1308,10 +1305,7 @@ def run_strategic_qa_gate(
             {"role": "system", "content": _STRATEGIC_QA_INVESTOR_SYSTEM},
             {"role": "user", "content": f"Check market viability:\n\n{context}"},
         ])
-        try:
-            investor_result = json.loads(_clean_json_response(investor_raw))
-        except (json.JSONDecodeError, ValueError):
-            investor_result = {"overall_verdict": "warn", "checks": []}
+        investor_result = _parse_json_phase(investor_raw, {"overall_verdict": "warn", "checks": []}, "StrategicQA.investor")
 
     combined = {
         "founder_preservation": founder_result,
@@ -1403,11 +1397,7 @@ def run_decision_council(
         {"role": "user", "content": f"Make the final MVP decision:\n\n{context}"},
     ])
 
-    try:
-        result = json.loads(_clean_json_response(raw))
-    except (json.JSONDecodeError, ValueError):
-        log_pm_audit("DecisionCouncil | Status=PARSE_FAIL | returning default reject")
-        result = {"verdict": "needs_revision", "approved_mvp": [], "blockers": ["council_parse_failure"]}
+    result = _parse_json_phase(raw, {"verdict": "needs_revision", "approved_mvp": [], "blockers": ["council_parse_failure"]}, "DecisionCouncil")
 
     # Non-linear confidence clamp: if any strategic QA high severity, force confidence <= 0.30
     if has_high_severity:
@@ -1504,10 +1494,7 @@ def run_validation_strategy_engine(
         {"role": "system", "content": _VALIDATION_STRATEGY_SYSTEM},
         {"role": "user", "content": f"Generate the validation strategy:\n\n{context}"},
     ])
-    try:
-        val_result = json.loads(_clean_json_response(val_raw))
-    except (json.JSONDecodeError, ValueError):
-        val_result = {"core_hypothesis": [], "failure_modes": [], "counterfactuals": [], "next_experiments": []}
+    val_result = _parse_json_phase(val_raw, {"core_hypothesis": [], "failure_modes": [], "counterfactuals": [], "next_experiments": []}, "ValidationEngine")
 
     # Failure scenarios (cheap model, optional)
     failure_scenarios = []
@@ -1591,10 +1578,7 @@ def run_consistency_guardrail(
         {"role": "user", "content": f"Check cross-document consistency:\n\n{context}"},
     ])
 
-    try:
-        result = json.loads(_clean_json_response(raw))
-    except (json.JSONDecodeError, ValueError):
-        result = {"overall_status": "warn", "checks": []}
+    result = _parse_json_phase(raw, {"overall_status": "warn", "checks": []}, "ConsistencyGuardrail")
 
     # Process checks
     cg_event_id = parent_event_id
