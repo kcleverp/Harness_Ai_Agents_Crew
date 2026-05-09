@@ -1371,7 +1371,7 @@ def run_planning():
         ensure_founder_summary_korean(run_id=run_id)
         translation_checked = True
 
-        snapshot = create_archive_snapshot(snapshot_tag)
+        snapshot = create_archive_snapshot(snapshot_tag, run_id=run_id)
         print(f"Archived to {snapshot}")
 
         output_files = [
