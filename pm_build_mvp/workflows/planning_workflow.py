@@ -236,6 +236,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
         loop_event_id = log_reasoning_event(
             run_id=run_id, phase="IdeaLoop",
             event_type="critique_generated",
+            domain="decision", category="selection",
             artifact="concept_draft_v1",
             details=item,
             parent_event_id=loop_event_id,
@@ -265,6 +266,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
             loop_event_id = log_reasoning_event(
                 run_id=run_id, phase="IdeaLoop",
                 event_type="conflict_detected",
+                domain="decision", category="selection",
                 artifact="concept_draft_v2",
                 details={"conflict_type": item.get("conflict_type"), "risk": item.get("risk"), "confidence": item.get("confidence")},
                 parent_event_id=loop_event_id,
@@ -743,6 +745,7 @@ def run_product_qa_gate(
             qa_event_id = log_reasoning_event(
                 run_id=run_id, phase="ProductQA",
                 event_type="validation_warning",
+                domain="qa", category="validation",
                 artifact="concept_checkpoint",
                 details={
                     "qa_type": qa.get("qa_type"),
@@ -822,6 +825,7 @@ def _run_escalation_retry(
         log_reasoning_event(
             run_id=run_id, phase="Escalation",
             event_type="escalation_triggered",
+            domain="qa", category="escalation",
             artifact="product_qa",
             details={
                 "failure_type": failure_type,
@@ -904,6 +908,7 @@ def run_strategic_qa_gate(
             qa_event_id = log_reasoning_event(
                 run_id=run_id, phase="StrategicQA",
                 event_type="validation_warning",
+                domain="qa", category="validation",
                 artifact="blueprint",
                 details=check,
                 parent_event_id=qa_event_id,
@@ -913,6 +918,7 @@ def run_strategic_qa_gate(
         log_reasoning_event(
             run_id=run_id, phase="StrategicQA",
             event_type="escalation_triggered",
+            domain="qa", category="escalation",
             artifact="strategic_qa",
             details={"reason": "high_severity_risk_detected", "combined": combined},
             parent_event_id=qa_event_id,
@@ -999,6 +1005,7 @@ def run_decision_council(
             log_reasoning_event(
                 run_id=run_id, phase="DecisionCouncil",
                 event_type="confidence_penalty_applied",
+                domain="decision", category="tradeoff",
                 artifact="council_decision",
                 details={"clamp": 0.30, "previous": round(current_final, 4)},
                 parent_event_id=parent_event_id,
@@ -1016,6 +1023,7 @@ def run_decision_council(
     council_event_id = log_reasoning_event(
         run_id=run_id, phase="DecisionCouncil",
         event_type="council_approved" if result.get("verdict") == "approved" else "council_rejected",
+        domain="decision", category="tradeoff",
         artifact="council_decision",
         details={
             "verdict": result.get("verdict"),
@@ -1100,6 +1108,7 @@ def run_validation_strategy_engine(
         val_event_id = log_reasoning_event(
             run_id=run_id, phase="ValidationEngine",
             event_type="validation_warning",
+            domain="qa", category="validation",
             artifact=hyp.get("id", "hypothesis"),
             details={"kpi": hyp.get("kpi"), "signal_latency": hyp.get("signal_latency"), "decision_impact": hyp.get("decision_impact")},
             parent_event_id=val_event_id,
@@ -1172,6 +1181,8 @@ def run_consistency_guardrail(
             cg_event_id = log_reasoning_event(
                 run_id=run_id, phase="ConsistencyGuardrail",
                 event_type="validation_warning" if severity == "warn" else "escalation_triggered",
+                domain="qa",
+                category="validation" if severity == "warn" else "escalation",
                 artifact=check.get("comparison", "document"),
                 details=check,
                 parent_event_id=cg_event_id,
@@ -1265,7 +1276,8 @@ def run_planning():
     try:
         print("Phase 1: Idea Loop")
         workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="IdeaLoop", event_type="critique_generated",
+            run_id=run_id, phase="IdeaLoop", event_type="phase_start",
+            domain="workflow", category="lifecycle",
             artifact="raw_ideas", details={"step": "start"}, parent_event_id=workflow_event_id,
         )
         run_idea_loop(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
@@ -1281,7 +1293,8 @@ def run_planning():
         print("Phase v4-B6: Product QA Gate")
         qa_result = run_product_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
         workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="ProductQA", event_type="validation_warning",
+            run_id=run_id, phase="ProductQA", event_type="phase_end",
+            domain="workflow", category="lifecycle",
             artifact="product_qa_result",
             details={"overall_status": qa_result.get("overall_status")},
             parent_event_id=workflow_event_id,
@@ -1290,7 +1303,8 @@ def run_planning():
         print("Phase v4-C7: Strategic QA Gate")
         strategic_result = run_strategic_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
         workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="StrategicQA", event_type="validation_warning",
+            run_id=run_id, phase="StrategicQA", event_type="phase_end",
+            domain="workflow", category="lifecycle",
             artifact="strategic_qa_result",
             details={"has_high_severity": strategic_result.get("has_high_severity", False)},
             parent_event_id=workflow_event_id,
@@ -1302,6 +1316,7 @@ def run_planning():
         workflow_event_id = log_reasoning_event(
             run_id=run_id, phase="DecisionCouncil",
             event_type="council_approved" if council_verdict == "approved" else "council_rejected",
+            domain="decision", category="tradeoff",
             artifact="council_decision",
             details={"verdict": council_verdict},
             parent_event_id=workflow_event_id,
