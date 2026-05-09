@@ -1,4 +1,5 @@
 {
+  "_comment": "REFERENCE ONLY — this file is not read by any runtime code. LLM models are configured via .env role-specific vars. Paths and safety settings are hardcoded in harness modules. Persona paths are superseded by prompts/.",
   "project": "pm_build_mvp",
   "version": "0.1.0",
   "llm": {
@@ -23,6 +24,7 @@
     "schema_validation": true
   },
   "personas": {
+    "_comment": "reference only — personas/ files are not runtime-loaded; active prompts live in prompts/",
     "pm_director": "./personas/pm_director.md",
     "product_pm": "./personas/product_pm.md",
     "qa_pm": "./personas/qa_pm.md"

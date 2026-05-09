@@ -11,7 +11,7 @@ Uses CrewAI hierarchical process with OpenRouter LLM backend.
 pm_build_mvp/
 ├── main.py                          # Entry point
 ├── .env.example                     # Environment variable template
-├── config.json                      # Project configuration reference
+├── config.json                      # [reference only — not runtime-loaded; see .env for active config]
 ├── requirements.txt                 # Python dependencies
 ├── personas/
 │   ├── translator.md                # [reference only — content moved to prompts/translator_system.md]
