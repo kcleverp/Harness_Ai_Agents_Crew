@@ -6,6 +6,29 @@ _TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../tem
 _cache: dict[str, str] = {}
 
 
+def validate_prompt_files(names: list[str]) -> list[str]:
+    """Return a list of prompt names whose .md files do not exist on disk.
+
+    Use this for preflight checks before workflow execution so that all
+    missing files are reported at once rather than failing on the first one.
+    """
+    return [name for name in names if not os.path.exists(os.path.join(_PROMPTS_DIR, f"{name}.md"))]
+
+
+# Canonical list of all prompt files required by planning_workflow.
+# Used for preflight validation in both main.py and planning_workflow.py.
+WORKFLOW_REQUIRED_PROMPTS: list[str] = [
+    "idea_gen_system", "idea_critique_system", "idea_revise_system",
+    "synthesis_system", "decision_system", "founder_summary_system",
+    "feature_spec_system", "tech_gen_system", "tech_review_system",
+    "tech_revise_system", "product_qa_system", "strategic_qa_founder_system",
+    "strategic_qa_investor_system", "decision_council_system",
+    "validation_strategy_system", "failure_scenario_system",
+    "consistency_guardrail_system", "escalation_system",
+    "kernel_guard_header", "kernel_guard_footer",
+]
+
+
 def load_prompt(name: str) -> str:
     """Load a prompt file from prompts/{name}.md.
 

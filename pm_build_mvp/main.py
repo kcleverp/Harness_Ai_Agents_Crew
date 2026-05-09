@@ -1,8 +1,8 @@
 import os
 import shutil
 from dotenv import load_dotenv
-from workflows.planning_workflow import run_planning
 from harness.llm_factory import validate_llm_env
+from harness.prompt_loader import validate_prompt_files, WORKFLOW_REQUIRED_PROMPTS
 
 load_dotenv()
 
@@ -31,6 +31,15 @@ if __name__ == "__main__":
         for e in env_errors:
             print(f"- {e}")
         raise SystemExit(1)
+
+    missing_prompts = validate_prompt_files(WORKFLOW_REQUIRED_PROMPTS)
+    if missing_prompts:
+        print(f"Prompt preflight failed — {len(missing_prompts)} file(s) missing:")
+        for name in missing_prompts:
+            print(f"  - prompts/{name}.md")
+        raise SystemExit(1)
+
+    from workflows.planning_workflow import run_planning
 
     print("Starting Planning Workflow...")
     output = run_planning()

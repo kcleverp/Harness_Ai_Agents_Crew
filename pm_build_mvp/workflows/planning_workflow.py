@@ -3,7 +3,7 @@ import json
 import re
 import uuid
 from crewai import Agent, Task, Crew, Process
-from harness.prompt_loader import load_prompt
+from harness.prompt_loader import load_prompt, validate_prompt_files, WORKFLOW_REQUIRED_PROMPTS
 from harness.safe_file_tools import safe_read, safe_write, read_workspace_file, write_workspace_file
 from harness.schema_validator import validate_handoff, HandoffSchema
 from harness.risk_engine import calculate_risk
@@ -33,8 +33,18 @@ from harness.translator_runner import ensure_founder_summary_korean
 from harness.telemetry_projection import generate_all_projections
 
 # ---------------------------------------------------------------------------
-# Phase system prompts — loaded from prompts/*.md at import time
+# Phase system prompts — preflight check then load from prompts/*.md
 # ---------------------------------------------------------------------------
+
+_REQUIRED_PROMPTS = WORKFLOW_REQUIRED_PROMPTS
+
+_missing = validate_prompt_files(_REQUIRED_PROMPTS)
+if _missing:
+    raise FileNotFoundError(
+        f"Prompt preflight failed — {len(_missing)} file(s) missing. "
+        "Workflow cannot start.\n"
+        + "\n".join(f"  - prompts/{name}.md" for name in _missing)
+    )
 
 _IDEA_GEN_SYSTEM = load_prompt("idea_gen_system")
 _IDEA_CRITIQUE_SYSTEM = load_prompt("idea_critique_system")
