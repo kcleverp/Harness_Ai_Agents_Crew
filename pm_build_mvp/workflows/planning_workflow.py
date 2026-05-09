@@ -805,18 +805,33 @@ def _run_escalation_retry(
             f"Reason={env_var} not configured"
         )
         return
+    output_path = f"current/qa/escalation_result_{failure_type}.json"
     try:
         llm = factory()
-        llm.call([
+        response = llm.call([
             {"role": "system", "content": load_prompt("escalation_system")},
             {"role": "user", "content": f"Failure type: {failure_type}\n\nContext:\n{context}"},
         ])
+        escalation_payload = json.dumps({
+            "failure_type": failure_type,
+            "model": os.getenv(env_var, ""),
+            "run_id": run_id,
+            "response": response if isinstance(response, str) else str(response),
+        }, ensure_ascii=False, indent=2)
+        write_workspace_file(output_path, escalation_payload)
         log_reasoning_event(
             run_id=run_id, phase="Escalation",
             event_type="escalation_triggered",
             artifact="product_qa",
-            details={"failure_type": failure_type, "model": os.getenv(env_var, "")},
+            details={
+                "failure_type": failure_type,
+                "model": os.getenv(env_var, ""),
+                "output": output_path,
+            },
             parent_event_id=parent_event_id,
+        )
+        log_pm_audit(
+            f"Escalation | Status=SAVED | FailureType={failure_type} | Output={output_path}"
         )
     except Exception as exc:
         log_pm_audit(f"Escalation | Status=ERROR | FailureType={failure_type} | Error={exc}")
