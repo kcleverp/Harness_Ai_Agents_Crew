@@ -14,18 +14,47 @@ pm_build_mvp/
 ├── config.json                      # Project configuration reference
 ├── requirements.txt                 # Python dependencies
 ├── personas/
-│   ├── pm_director.md               # PM Director agent backstory
-│   ├── product_pm.md                # Product PM agent backstory
-│   └── qa_pm.md                     # QA PM agent backstory
+│   ├── translator.md                # Translator persona (runtime-loaded by translator_runner.py)
+│   ├── pm_director.md               # [reference only — not runtime-loaded]
+│   ├── product_pm.md                # [reference only — not runtime-loaded]
+│   └── qa_pm.md                     # [reference only — not runtime-loaded]
+├── prompts/                         # System prompts — runtime-loaded via prompt_loader.py
+│   ├── idea_gen_system.md           # Phase 1: Idea generation
+│   ├── idea_critique_system.md      # Phase 1: Critique
+│   ├── idea_revise_system.md        # Phase 1: Revision
+│   ├── synthesis_system.md          # Phase 2: Synthesis
+│   ├── decision_system.md           # Phase 3: Decision
+│   ├── founder_summary_system.md    # Phase 4: Founder summary
+│   ├── feature_spec_system.md       # Phase 4: Feature spec
+│   ├── tech_gen_system.md           # Phase 5: Tech JSON generation
+│   ├── tech_review_system.md        # Phase 5: Tech review
+│   ├── tech_revise_system.md        # Phase 5: Tech revision
+│   ├── product_qa_system.md         # v4 QA gate
+│   ├── strategic_qa_founder_system.md  # v4 Strategic QA: Founder
+│   ├── strategic_qa_investor_system.md # v4 Strategic QA: Investor
+│   ├── decision_council_system.md   # v4 Decision council
+│   ├── validation_strategy_system.md   # Phase D: Validation
+│   ├── failure_scenario_system.md   # Phase D: Failure scenarios
+│   ├── consistency_guardrail_system.md # Phase D: Consistency
+│   ├── escalation_system.md         # Escalation routing
+│   ├── kernel_guard_header.md       # Kernel guard prefix
+│   ├── kernel_guard_footer.md       # Kernel guard suffix
+│   └── patch_agent.md               # Patch crew agent meta
+├── templates/
+│   ├── raw_ideas.sample.md          # Sample idea (auto-copied on first run)
+│   └── patch_task_description.template.md  # Patch task template
 ├── workflows/
-│   └── planning_workflow.py         # CrewAI hierarchical workflow
+│   └── planning_workflow.py         # Phase-based planning workflow
 ├── harness/
-│   ├── llm_factory.py               # LLM build (OpenRouter → OpenAI fallback)
+│   ├── llm_factory.py               # Role-specific LLM builders (7 required + optional v4)
+│   ├── prompt_loader.py             # Prompt/template file loader with cache
 │   ├── safe_file_tools.py           # Sandboxed file read/write/patch tools
 │   ├── schema_validator.py          # Pydantic HandoffSchema validation
 │   ├── audit_hooks.py               # Structured log writers
 │   ├── dev_exporter.py              # workspace/current → archive snapshot
 │   ├── patch_engine.py              # CrewAI partial JSON patch crew
+│   ├── kernel_guard.py              # Founder Kernel loader, hash guard, prompt injector
+│   ├── translator_runner.py         # Post-process Korean translation (personas/translator.md)
 │   └── risk_engine.py               # Risk score calculator
 ├── workspace/
 │   ├── raw_ideas.md                 # (auto-created on first run) Idea input
@@ -51,19 +80,27 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` — minimum required:
+Edit `.env` — minimum required (7 role-specific model vars + API key):
 
 ```env
-# Option A: OpenRouter (recommended)
+# Connection (required)
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
 
-# Option B: OpenAI fallback
-OPENAI_API_KEY=sk-...
+# Role-based models (all 7 required — startup validation will fail if any are missing)
+OPENROUTER_MODEL_IDEA=google/gemini-2.5-flash
+OPENROUTER_MODEL_IDEA_CRITIC=openai/gpt-4o-mini
+OPENROUTER_MODEL_SYNTHESIS=openai/gpt-4o-mini
+OPENROUTER_MODEL_DECISION=anthropic/claude-opus-4-5
+OPENROUTER_MODEL_CREATIVE=anthropic/claude-sonnet-4-5
+OPENROUTER_MODEL_TECH_GEN=google/gemini-2.5-flash
+OPENROUTER_MODEL_TECH_REVIEW=openai/gpt-4o-mini
 ```
 
-`llm_factory.py` reads `OPENROUTER_*` first; falls back to `OPENAI_*` if unset.
+`llm_factory.validate_llm_env()` checks all 7 required role vars at startup and exits(1) on failure.
+Optional v4 roles (`STRATEGIC_QA`, `INVESTOR_QA`, `COUNCIL_*`, `VALIDATION`, `FAILURE_SCENARIO`, `CONSISTENCY`, `ESCALATION_*`) print a warning if unset; those phases are skipped.
+
+> **Note**: `OPENROUTER_MODEL` is a legacy var used only by `patch_engine.py`. Do not rely on it for new phase configuration. See `.env.example` for a full annotated template.
 
 ### 3. Run
 
