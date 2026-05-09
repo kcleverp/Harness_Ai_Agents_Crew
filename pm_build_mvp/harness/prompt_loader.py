@@ -3,7 +3,8 @@ import os
 _PROMPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../prompts"))
 _TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../templates"))
 
-_cache: dict[str, str] = {}
+_prompt_cache: dict[str, str] = {}
+_template_cache: dict[str, str] = {}
 
 
 def validate_prompt_files(names: list[str]) -> list[str]:
@@ -32,11 +33,11 @@ WORKFLOW_REQUIRED_PROMPTS: list[str] = [
 def load_prompt(name: str) -> str:
     """Load a prompt file from prompts/{name}.md.
 
-    Results are cached per process — each file is read exactly once.
-    Raises FileNotFoundError if the prompt file does not exist.
+    Results are cached per process in a prompt-only namespace — each file is
+    read exactly once. Raises FileNotFoundError if the prompt file does not exist.
     """
-    if name in _cache:
-        return _cache[name]
+    if name in _prompt_cache:
+        return _prompt_cache[name]
     path = os.path.join(_PROMPTS_DIR, f"{name}.md")
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -45,18 +46,19 @@ def load_prompt(name: str) -> str:
         )
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
-    _cache[name] = content
+    _prompt_cache[name] = content
     return content
 
 
 def load_template(name: str) -> str:
     """Load a template file from templates/{name}.
 
-    Results are cached per process.
+    Results are cached per process in a template-only namespace — isolated from
+    the prompt cache to prevent key collisions when names overlap.
     Raises FileNotFoundError if the template file does not exist.
     """
-    if name in _cache:
-        return _cache[name]
+    if name in _template_cache:
+        return _template_cache[name]
     path = os.path.join(_TEMPLATES_DIR, name)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -65,5 +67,5 @@ def load_template(name: str) -> str:
         )
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
-    _cache[name] = content
+    _template_cache[name] = content
     return content
