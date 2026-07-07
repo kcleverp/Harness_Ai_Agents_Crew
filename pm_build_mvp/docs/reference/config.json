@@ -22,11 +22,5 @@
     "max_file_size_kb": 512,
     "audit_enabled": true,
     "schema_validation": true
-  },
-  "personas": {
-    "_comment": "reference only — personas/ files are not runtime-loaded; active prompts live in prompts/",
-    "pm_director": "./personas/pm_director.md",
-    "product_pm": "./personas/product_pm.md",
-    "qa_pm": "./personas/qa_pm.md"
   }
 }
