@@ -3,6 +3,109 @@
 AI-powered PM crew for structured MVP product planning.
 Uses CrewAI hierarchical process with OpenRouter LLM backend.
 
+**Hybrid OS Console** — FastAPI server + SSE + React frontend for live run monitoring,
+founder intent review, workspace browsing, and kernel editing.
+
+---
+
+## Hybrid OS Console (FastAPI + SSE + React)
+
+### Architecture
+
+```
+pm_build_mvp/
+├── server/           FastAPI — runs, SSE events, intent gate, workspace, kernel, decisions
+├── frontend/         React + Vite — Live Feed, Intent Review, Workspace, Kernel, Decisions
+├── harness/          Core engine (audit_hooks, event_stream, intent_review, cognitive_*)
+└── workflows/        planning_workflow + phases/upstream (Layer 1~3)
+```
+
+### Quick start
+
+**한 번에 실행** (API + React, `pm_build_mvp/`에서):
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # configure OPENROUTER_* keys
+npm install            # concurrently (root) + frontend deps
+npm run dev            # API: free port from 8000↑ + UI :5173
+```
+
+시작 시 콘솔에 실제 API 포트가 출력됩니다 (예: `[dev] API http://127.0.0.1:8003`).  
+8000이 막혀 있으면 8001, 8002… 순으로 자동 탐색합니다.
+
+선택 env:
+- `PM_API_PORT=8080` — 탐색 시작 포트 (기본 8000)
+- `PM_API_PORT_MAX=50` — 최대 시도 개수 (기본 50)
+
+브라우저: **http://localhost:5173**
+
+---
+
+**터미널 분리 실행** (디버깅용):
+
+**Terminal 1 — API server** (from `pm_build_mvp/`):
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # configure OPENROUTER_* keys
+uvicorn server.main:app --reload --port 8000
+```
+
+**Terminal 2 — React dev server**:
+
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:5173 — proxies /runs, /kernel to :8000
+```
+
+Open the console → **Start Run**. Live Feed receives SSE events from `GET /runs/{id}/events`.
+
+### SSE contract
+
+| Item | Value |
+|---|---|
+| Endpoint | `GET /runs/{run_id}/events` |
+| Format | `data: {canonical event JSON}\n\n` |
+| Backfill | Full `reasoning_trace.jsonl` for run_id on connect |
+| Live | In-proc pub/sub via `harness/event_stream.py` |
+| End | `event: end\ndata: {}\n\n` when run reaches terminal state |
+| Terminal states | `complete`, `failed`, `rejected` |
+
+### REST endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/runs` | Start workflow thread (one active run max) |
+| GET | `/runs/{id}` | Run status (`running` / `awaiting_choice` / `complete` / …) |
+| GET | `/runs/{id}/events` | SSE event stream |
+| GET | `/runs/{id}/intent-review` | Layer 0.5 review document |
+| POST | `/runs/{id}/intent-choice` | Founder decision (`proceed` / `reject` / `edit`) |
+| GET | `/runs/{id}/workspace` | Artifact file tree |
+| GET | `/runs/{id}/workspace/file?path=` | File content (.md / .json) |
+| GET | `/runs/{id}/decisions` | Decision graph timeline |
+| GET/PUT | `/kernel` | Founder kernel read/write |
+
+### Key environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PM_VERDICT_MODE` | `api` | Intent gate: `api` \| `interactive` \| `auto_proceed` |
+| `PM_INTENT_REVIEW_TIMEOUT_SEC` | `600` | api mode timeout → reject |
+| `PM_EVENT_STREAM` | `1` (server enables) | Publish events to SSE pub/sub |
+| `PM_COGNITIVE_MEMORY` | `1` | Extract `<thinking>` / `<decision_graph>` in Decision/Council |
+| `OPENROUTER_MODEL_INTENT_REVIEW` | — | Layer 0.5 gate (unset → skip) |
+| `OPENROUTER_MODEL_USER_DEF` | — | Layer 1 upstream (unset → skip all upstream) |
+| `OPENROUTER_MODEL_PROBLEM` | — | Layer 2 problem discovery |
+| `OPENROUTER_MODEL_OPPORTUNITY` | — | Layer 3 opportunity sizing |
+
+### CLI mode (legacy)
+
+```bash
+python main.py    # direct workflow, no server/UI
+```
+
 ---
 
 ## Project Structure
@@ -11,13 +114,14 @@ Uses CrewAI hierarchical process with OpenRouter LLM backend.
 pm_build_mvp/
 ├── main.py                          # Entry point
 ├── .env.example                     # Environment variable template
-├── config.json                      # [reference only — not runtime-loaded; see .env for active config]
+├── docs/
+│   └── reference/
+│       ├── config.json              # [reference only — not runtime-loaded; see .env for active config]
+│       └── personas/
+│           ├── pm_director.md       # Historical guide reference
+│           ├── product_pm.md        # Historical guide reference
+│           └── qa_pm.md             # Historical guide reference
 ├── requirements.txt                 # Python dependencies
-├── personas/
-│   ├── translator.md                # [reference only — content moved to prompts/translator_system.md]
-│   ├── pm_director.md               # [reference only — not runtime-loaded]
-│   ├── product_pm.md                # [reference only — not runtime-loaded]
-│   └── qa_pm.md                     # [reference only — not runtime-loaded]
 ├── prompts/                         # System prompts — runtime-loaded via prompt_loader.py
 │   ├── idea_gen_system.md           # Phase 1: Idea generation
 │   ├── idea_critique_system.md      # Phase 1: Critique
@@ -43,15 +147,27 @@ pm_build_mvp/
 │   └── translator_system.md         # Post-process Korean translator
 ├── templates/
 │   ├── raw_ideas.sample.md          # Sample idea (auto-copied on first run)
-│   └── patch_task_description.template.md  # Patch task template
+│   └── founder_kernel.sample.json   # Starter kernel draft (auto-copied on first run)
 ├── workflows/
-│   └── planning_workflow.py         # Phase-based planning workflow
+│   ├── planning_workflow.py         # Phase-based planning workflow
+│   └── phases/
+│       └── upstream.py              # Layer 1~3 discovery (optional)
+├── server/
+│   ├── main.py                      # FastAPI app factory
+│   ├── run_manager.py               # Background workflow threads
+│   └── routes/                      # runs, stream (SSE), intent, workspace, kernel, decisions
+├── frontend/                        # React + Vite Hybrid OS Console
 ├── harness/
 │   ├── llm_factory.py               # Role-specific LLM builders (7 required + optional v4)
 │   ├── prompt_loader.py             # Prompt/template file loader with cache
 │   ├── safe_file_tools.py           # Sandboxed file read/write/patch tools
 │   ├── schema_validator.py          # Pydantic HandoffSchema validation
-│   ├── audit_hooks.py               # Structured log writers
+│   ├── audit_hooks.py               # Structured log writers + event_stream publish
+│   ├── event_stream.py              # In-proc pub/sub for SSE
+│   ├── intent_review.py             # Layer 0.5 Founder Intent Review Gate
+│   ├── cognitive_parser.py          # <thinking> / <decision_graph> extraction
+│   ├── cognitive_logger.py          # thinking_trace.jsonl + cognition snapshots
+│   ├── cognitive_context.py         # Rejected-alternatives context injection
 │   ├── dev_exporter.py              # workspace/current → archive snapshot
 │   ├── patch_engine.py              # CrewAI partial JSON patch crew
 │   ├── kernel_guard.py              # Founder Kernel loader, hash guard, prompt injector
@@ -162,13 +278,17 @@ main.py
 | `logs/pm_audit.log` | Workflow lifecycle events |
 | `logs/run_summary.log` | Per-run result summary (ok/risk/tasks/patches) |
 | `logs/validation_failures.log` | Schema validation errors with coordinates |
-| `logs/patch_actions.log` | Partial patch operations |
 | `logs/reasoning_trace.jsonl` | Canonical stream — append-only structured events (schema v1: domain/category/event_type) |
 | `logs/projections/runtime.log` | Derived: workflow lifecycle events (regenerable) |
 | `logs/projections/decisions.log` | Derived: decision/selection/tradeoff events (regenerable) |
 | `logs/projections/qa.log` | Derived: qa + system integrity events (regenerable) |
+| `logs/projections/cognition.log` | Derived: thinking + decision_graph events (regenerable) |
 | `logs/views/lineage_index.md` | View: chronological event lineage table (regenerable) |
 | `logs/views/pretty.log` | View: human-readable multiline event export (regenerable) |
+| `logs/decision_history.legacy_pre_v2.log` | Frozen pre-cutover archive (not validated, not projected) |
+| `logs/blueprint_logic.legacy_pre_v2.log` | Frozen pre-cutover archive (not validated, not projected) |
+| `logs/creative_process.legacy_pre_v2.log` | Frozen pre-cutover archive (not validated, not projected) |
+| `logs/patch_actions.legacy_pre_v2.log` | Frozen pre-cutover archive (not validated, not projected) |
 
 Archive tag: `todo_mvp` (risk < 70, consistency pass/skipped) or `high_risk_pending` (risk ≥ 70 or ConsistencyGuardrail fail).
 
@@ -208,7 +328,6 @@ Result => ok=True risk=30 attempts=0 errors=0 risk_reasons=0 consistency=pass,
   - Canonical write path unified (audit_hooks.py)
   - Telemetry projections: runtime / decisions / qa (telemetry_projection.py)
   - Views: lineage_index / pretty (telemetry_projection.py)
-  - Deterministic reconstruction verification (verify_run_reconstruction)
   - Transition compatibility mode + deprecation warnings
 
 ---
@@ -227,13 +346,16 @@ Observability infrastructure must never grow larger than the core system it serv
 
 ### Log Layer Definitions
 
-| Layer | Files | Role | Immutable? |
+| Category | Files | Mutability | Validation |
 |---|---|---|---|
-| **Canonical** | `logs/reasoning_trace.jsonl` | Single source of truth. Append-only event stream. | Yes |
-| **Projections** | `logs/projections/runtime.log`<br>`logs/projections/decisions.log`<br>`logs/projections/qa.log` | Semantic slices from canonical. Regenerable. | No |
-| **Views** | `logs/views/lineage_index.md`<br>`logs/views/pretty.log` | Human-readable rendering. Regenerable. | No |
-| **Legacy** (transition) | `logs/pm_audit.log`<br>`logs/decision_history.log`<br>`logs/blueprint_logic.log`<br>`logs/creative_process.log`<br>`logs/patch_actions.log`<br>`logs/run_summary.log`<br>`logs/validation_failures.log` | Phase-centric logs. Kept during transition. **Deprecated.** | No |
-| **Pre-v1 archive** | `logs/reasoning_trace.legacy_pre_v1.jsonl` | Preserved copy of events emitted before schema v1. Not subject to validation or projection. | — |
+| **Canonical stream** | `logs/reasoning_trace.jsonl` | append-only, immutable | schema v1 strict (write-level rejection) |
+| **Projection / View** | `logs/projections/runtime.log`<br>`logs/projections/decisions.log`<br>`logs/projections/qa.log`<br>`logs/views/lineage_index.md`<br>`logs/views/pretty.log` | regenerable | derived from canonical |
+| **Operational summary** | `logs/run_summary.log`<br>`logs/validation_failures.log`<br>`logs/pm_audit.log` | append-only, human-readable | none (text format) |
+| **Frozen archive** | `logs/reasoning_trace.legacy_pre_v1.jsonl`<br>`logs/decision_history.legacy_pre_v2.log`<br>`logs/blueprint_logic.legacy_pre_v2.log`<br>`logs/creative_process.legacy_pre_v2.log`<br>`logs/patch_actions.legacy_pre_v2.log` | read-only | not validated |
+
+**Operational summary logs** are written for human `grep`/`tail` use and are kept in dual-write with the canonical stream by design.
+
+**Phase-centric transition logs** are frozen at cutover v2 and preserved as `*.legacy_pre_v2.log` archives. Current code does not append to these files.
 
 **Rule**: Event meaning is declared by the event itself via `domain/category/event_type`. Projections never infer meaning from phase names.
 
@@ -298,11 +420,7 @@ Reproducible from `reasoning_trace.jsonl`:
 ### Verification
 
 ```python
-from harness.telemetry_projection import verify_run_reconstruction, generate_all_projections
-
-# Verify a specific run
-result = verify_run_reconstruction(run_id="<run_id>")
-print(result["ok"], result["anomalies"], result["hashes"])
+from harness.telemetry_projection import generate_all_projections
 
 # Regenerate all projections
 generate_all_projections(run_id="<run_id>")   # single run
