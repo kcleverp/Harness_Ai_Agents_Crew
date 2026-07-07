@@ -1,56 +1,76 @@
-from crewai import Agent, Task, Crew
-from .safe_file_tools import safe_read, apply_partial_patch, read_workspace_file
-from .audit_hooks import log_patch_action
-from .llm_factory import build_technical_review_llm
-from .prompt_loader import load_prompt, load_template
+import json
+import re
 
-def _parse_agent_meta(text: str) -> dict:
-    """Parse key: value lines from patch_agent.md into a dict."""
-    result = {}
-    for line in text.splitlines():
-        if ": " in line:
-            key, _, value = line.partition(": ")
-            result[key.strip()] = value.strip()
-    return result
+from harness.audit_hooks import log_pm_audit
+from harness.llm_factory import build_technical_review_llm
+from harness.safe_file_tools import patch_workspace_json, read_workspace_file
+
+
+def _strip_json_array(raw: str) -> str:
+    text = raw.strip()
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL | re.IGNORECASE)
+    return m.group(1).strip() if m else text
 
 
 def run_patch_crew(file_path: str, errors: list, run_id: str = ""):
+    """Apply schema fixes via one direct LLM call + partial JSON patches (no Crew loop)."""
+    del run_id  # reserved for future telemetry
+    current = read_workspace_file(file_path)
+    if current.startswith("Error:"):
+        log_pm_audit(f"Patch | Status=SKIP | {current}")
+        return None
+
     error_details = "\n".join(errors)
-    founder_context = read_workspace_file("current/docs/founder_summary.md")
     patch_llm = build_technical_review_llm()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a JSON schema repair assistant. "
+                "Output ONLY a JSON array of minimal patches. No commentary.\n"
+                'Each item: {"key_path": "dot.or.index.path", "value": <any JSON value>}\n'
+                "Fix ONLY the validation errors listed. Do not rewrite unrelated fields."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"File: {file_path}\n\n"
+                f"Validation errors:\n{error_details}\n\n"
+                f"Current JSON:\n{current}\n\n"
+                "Return the patches array only."
+            ),
+        },
+    ]
 
-    agent_meta = _parse_agent_meta(load_prompt("patch_agent"))
-    task_description = load_template("patch_task_description.template.md").format(
-        file_path=file_path,
-        error_details=error_details,
-        founder_context=founder_context,
-    )
+    try:
+        raw = patch_llm.call(messages)
+    except Exception as exc:
+        log_pm_audit(f"Patch | Status=LLM_ERROR | {exc}")
+        return None
 
-    patch_agent = Agent(
-        role=agent_meta.get("role", "JSON Partial Repair Specialist"),
-        goal=agent_meta.get("goal", ""),
-        backstory=agent_meta.get("backstory", ""),
-        allow_delegation=False,
-        verbose=True,
-        tools=[safe_read, apply_partial_patch],
-        llm=patch_llm
-    )
+    try:
+        patches = json.loads(_strip_json_array(raw))
+    except json.JSONDecodeError as exc:
+        log_pm_audit(f"Patch | Status=PARSE_ERROR | {exc}")
+        return None
 
-    patch_task = Task(
-        description=task_description,
-        expected_output="Confirmation that all specified errors were patched.",
-        agent=patch_agent
-    )
-    
-    crew = Crew(agents=[patch_agent], tasks=[patch_task])
-    result = crew.kickoff()
+    if not isinstance(patches, list):
+        log_pm_audit("Patch | Status=INVALID | expected JSON array")
+        return None
 
-    result_str = str(result) if result is not None else "no_result"
-    for error in errors:
-        log_patch_action(
-            file_path, error, result_str,
-            error_code="SCHEMA_PATCH_TRIGGER",
-            run_id=run_id, phase="PatchEngine",
-        )
+    applied = 0
+    for item in patches:
+        if not isinstance(item, dict):
+            continue
+        key_path = item.get("key_path")
+        if not key_path:
+            continue
+        value_json = json.dumps(item.get("value"), ensure_ascii=False)
+        result = patch_workspace_json(file_path, str(key_path), value_json)
+        log_pm_audit(f"Patch | {result}")
+        if result.startswith("Success"):
+            applied += 1
 
-    return result
+    log_pm_audit(f"Patch | Status=DONE | applied={applied}/{len(patches)}")
+    return {"applied": applied, "total": len(patches)}

@@ -1,0 +1,20 @@
+{
+  "core_thesis": [
+    "1인·소규모 팀이 하루 할 일을 빠르게 적고 끝내는 초경량 웹 To-Do",
+    "Supabase 기반 — 빠른 MVP ship, 이후 모바일 확장 가능"
+  ],
+  "non_negotiables": [
+    "Task CRUD + All/Active/Completed 필터는 MVP 필수",
+    "Web-first (모바일은 v2)",
+    "Supabase + Python SDK 스택 고정"
+  ],
+  "anti_patterns": [
+    "MVP에 결제/구독/리퍼럴 프리미엄 테마 넣지 않음",
+    "복잡한 협업·권한·워크스페이스는 제외",
+    "AI 자동 우선순위 추천은 제외"
+  ],
+  "founder_convictions": [
+    "speed-to-ship — 2주 내 usable MVP가 최우선",
+    "단순 UX — task 생성은 3탭 이내"
+  ]
+}

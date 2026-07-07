@@ -8,6 +8,8 @@ Entry point: ensure_founder_summary_korean()
 import os
 import re
 
+from harness.paths import WORKSPACE_DIR
+
 from harness.audit_hooks import log_pm_audit, log_reasoning_event
 from harness.llm_factory import build_translator_llm_from_env
 from harness.prompt_loader import load_prompt
@@ -46,7 +48,7 @@ def ensure_founder_summary_korean(run_id: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 def _run(reason_check: bool = True, run_id: str = "") -> None:
-    workspace_dir = _workspace_dir()
+    workspace_dir = WORKSPACE_DIR
     en_abs = os.path.join(workspace_dir, _EN_PATH)
     ko_abs = os.path.join(workspace_dir, _KO_PATH)
 
@@ -233,10 +235,6 @@ def _strip_code_fences(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _workspace_dir() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "../workspace"))
-
 
 def _read_abs(abs_path: str) -> str:
     with open(abs_path, "r", encoding="utf-8") as f:

@@ -1,7 +1,6 @@
 import os
 
-_PROMPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../prompts"))
-_TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../templates"))
+from harness.paths import PROMPTS_DIR as _PROMPTS_DIR, TEMPLATES_DIR as _TEMPLATES_DIR
 
 _prompt_cache: dict[str, str] = {}
 _template_cache: dict[str, str] = {}
@@ -26,7 +25,9 @@ WORKFLOW_REQUIRED_PROMPTS: list[str] = [
     "strategic_qa_investor_system", "decision_council_system",
     "validation_strategy_system", "failure_scenario_system",
     "consistency_guardrail_system", "escalation_system",
+    "founder_intent_review",
     "kernel_guard_header", "kernel_guard_footer",
+    "translator_system", "patch_agent",
 ]
 
 

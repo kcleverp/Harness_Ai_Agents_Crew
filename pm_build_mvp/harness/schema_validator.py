@@ -1,10 +1,10 @@
 # NOTE: Hard schema validation (raises on failure, triggers patch loop).
 # Soft structural validation (warn-only) lives in
-# workflows/planning_workflow.py (_validate_backlog). Keep enum values and
-# required field rules in sync between these two locations when modifying either.
+# workflows/planning_workflow.py (_validate_backlog), which imports the
+# constants below so enum values and required field rules stay in sync.
 import json
 from pydantic import BaseModel, ValidationError, Field
-from typing import List, Literal
+from typing import List, Literal, get_args
 
 class TechStack(BaseModel):
     status: Literal["proposed", "pending", "locked"] = Field(..., description="Current status of the tech stack choice")
@@ -31,6 +31,14 @@ class HandoffSchema(BaseModel):
     target_platform: Literal["web", "mobile", "api", "desktop"]
     tech_stack: TechStack
     tasks: List[TaskItem] = Field(..., description="List of broken-down development tasks")
+
+# Derived from the Pydantic model so there is a single source of truth.
+# planning_workflow._validate_backlog imports these instead of maintaining
+# its own copies.
+VALID_OWNERS: frozenset = frozenset(get_args(TaskItem.model_fields["owner"].annotation))
+VALID_PRIORITIES: frozenset = frozenset(get_args(TaskItem.model_fields["priority"].annotation))
+BACKLOG_REQUIRED_TASK_FIELDS: frozenset = frozenset(TaskItem.model_fields.keys())
+
 
 def validate_handoff(json_content: str):
     """Validates handoff JSON and returns exact coordinates of failures."""

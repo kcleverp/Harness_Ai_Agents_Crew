@@ -2,35 +2,50 @@
 import json
 import re
 import uuid
-from crewai import Agent, Task, Crew, Process
 from harness.prompt_loader import load_prompt, validate_prompt_files, WORKFLOW_REQUIRED_PROMPTS
-from harness.safe_file_tools import safe_read, safe_write, read_workspace_file, write_workspace_file
-from harness.schema_validator import validate_handoff, HandoffSchema
+from harness.safe_file_tools import read_workspace_file, write_workspace_file
+from harness.schema_validator import (
+    validate_handoff,
+    VALID_OWNERS, VALID_PRIORITIES, BACKLOG_REQUIRED_TASK_FIELDS,
+)
 from harness.risk_engine import calculate_risk
 from harness.audit_hooks import (
     log_pm_audit, log_run_summary, log_validation_error,
     log_pm_audit_event, log_decision_history, log_blueprint_logic, log_creative_process,
-    log_reasoning_event, log_system_integrity_alert, log_founder_override,
+    log_reasoning_event, log_system_integrity_alert,
 )
-from harness.dev_exporter import create_archive_snapshot
+from harness.consistency_digest import build_consistency_digest
 from harness.patch_engine import run_patch_crew
 from harness.kernel_guard import (
     load_founder_kernel, save_founder_kernel,
     inject_kernel_guard, assert_kernel_integrity,
     validate_founder_evidence_ref,
 )
+from harness.intent_review import run_intent_review
 from harness.llm_factory import (
-    build_llm_from_env,
     build_idea_llm, build_idea_critic_llm, build_synthesis_llm,
     build_decision_llm, build_creative_llm,
     build_technical_gen_llm, build_technical_review_llm,
     build_strategic_qa_llm, build_investor_qa_llm,
-    build_council_strategic_llm, build_council_execution_llm, build_council_simple_llm,
+    build_council_strategic_llm,
     build_validation_llm, build_failure_scenario_llm, build_consistency_llm,
     build_escalation_logic_llm, build_escalation_ops_llm, build_escalation_spec_llm,
 )
+from harness.dev_exporter import create_archive_snapshot
 from harness.translator_runner import ensure_founder_summary_korean
+from harness.batch_translator import ensure_decisions_korean
 from harness.telemetry_projection import generate_all_projections
+from harness.cognitive_utils import append_cognitive_contract, cognitive_enabled, inject_cognitive_context
+from harness.cognitive_validate import call_with_cognitive_retry
+from harness.confidence_scoring import compute_decision_confidence, compute_product_qa_confidence
+from harness.pm_brief import enrich_checkpoint_from_brief, load_pm_brief_context
+from harness.pm_reconstruction import reconstruction_enabled, run_pm_reconstruction
+from workflows.phases.upstream import (
+    run_opportunity_sizing,
+    run_problem_discovery,
+    run_user_definition,
+    upstream_enabled,
+)
 
 # ---------------------------------------------------------------------------
 # Phase system prompts — preflight check then load from prompts/*.md
@@ -194,13 +209,14 @@ def _format_critique_for_revision(critiques: list, fallback_text: str) -> str:
 def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_event_id: str | None = None) -> str:
     """Phase 1: Idea Loop
 
-    5-step Flash/mini iteration over raw_ideas.md.
+    3-step Flash/mini iteration: draft → critique → final.
     Outputs current/concept_draft.md with required sections.
-    Injects Founder Kernel Guard into generation prompts when kernel_data provided.
-    Logs structured critique confidence to reasoning_trace.jsonl.
-    Returns the output file path.
     """
     raw_idea = read_workspace_file("raw_ideas.md")
+    pm_context = load_pm_brief_context()
+    idea_input = raw_idea
+    if pm_context:
+        idea_input = f"{pm_context}\n\n## Raw Idea Seed\n{raw_idea}"
     idea_llm = build_idea_llm()
     critic_llm = build_idea_critic_llm()
 
@@ -219,7 +235,7 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
     # Step 1: Flash expands raw idea → draft v1
     draft_v1 = idea_llm.call([
         {"role": "system", "content": gen_system},
-        {"role": "user", "content": f"Expand this raw idea into an MVP concept:\n\n{raw_idea}"},
+        {"role": "user", "content": f"Expand this raw idea into an MVP concept:\n\n{idea_input}"},
     ])
 
     # Step 2: Mini produces structured critique of draft v1
@@ -242,43 +258,13 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
             parent_event_id=loop_event_id,
         )
 
-    # Step 3: Flash revises based on critique → draft v2
-    draft_v2 = idea_llm.call([
+    # Step 3: Flash applies critique → final draft with LOG_META
+    final_draft = idea_llm.call([
         {"role": "system", "content": revise_system},
         {"role": "user", "content": (
             f"Original draft:\n{draft_v1}\n\n"
             f"Critique to apply:\n{critique_text_1}\n\n"
-            "Revise the draft."
-        )},
-    ])
-
-    # Step 4: Mini produces structured critique of draft v2
-    critique_raw_2 = critic_llm.call([
-        {"role": "system", "content": _IDEA_CRITIQUE_SYSTEM},
-        {"role": "user", "content": f"Critique this revised MVP concept draft:\n\n{draft_v2}"},
-    ])
-    critiques_2 = _parse_structured_critiques(critique_raw_2)
-    critique_text_2 = _format_critique_for_revision(critiques_2, critique_raw_2)
-
-    # Log conflict_type events for detected conflicts
-    for item in critiques_2:
-        if item.get("conflict_type") not in ("none", None, ""):
-            loop_event_id = log_reasoning_event(
-                run_id=run_id, phase="IdeaLoop",
-                event_type="conflict_detected",
-                domain="decision", category="selection",
-                artifact="concept_draft_v2",
-                details={"conflict_type": item.get("conflict_type"), "risk": item.get("risk"), "confidence": item.get("confidence")},
-                parent_event_id=loop_event_id,
-            )
-
-    # Step 5: Flash generates final draft with LOG_META
-    final_draft = idea_llm.call([
-        {"role": "system", "content": revise_system},
-        {"role": "user", "content": (
-            f"Revised draft:\n{draft_v2}\n\n"
-            f"Final critique to apply:\n{critique_text_2}\n\n"
-            "Generate the definitive final concept draft."
+            "Apply every critique item. Generate the definitive final concept draft."
         )},
     ])
 
@@ -290,6 +276,17 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
 
     rejected_list = meta.get("rejected_features", [])
     risks_list = meta.get("risks", [])
+    idea_meta = {
+        "selected_core": meta.get("selected_core"),
+        "rejected_features": rejected_list,
+        "risks": risks_list,
+        "ko_summary": meta.get("ko_log_summary"),
+        "critiques": critiques_1,
+    }
+    write_workspace_file(
+        "current/docs/idea_meta.json",
+        json.dumps(idea_meta, indent=2, ensure_ascii=False),
+    )
 
     log_pm_audit_event(
         "IdeaLoop", "END",
@@ -302,6 +299,15 @@ def run_idea_loop(kernel_data: dict | None = None, run_id: str = "", parent_even
     )
     for feat in rejected_list:
         log_decision_history("IdeaLoop", rejected=feat, reason="non-MVP scope", run_id=run_id)
+
+    log_reasoning_event(
+        run_id=run_id, phase="IdeaLoop",
+        event_type="idea_loop_completed",
+        domain="decision", category="selection",
+        artifact="current/docs/idea_meta.json",
+        details=idea_meta,
+        parent_event_id=loop_event_id,
+    )
 
     return "current/docs/concept_draft.md"
 
@@ -319,15 +325,20 @@ def run_synthesis(run_id: str = "") -> dict:
     Raises RuntimeError if valid JSON cannot be produced after 1 self-correction.
     """
     draft = read_workspace_file("current/docs/concept_draft.md")
+    pm_context = load_pm_brief_context()
+    user_content = f"Convert this concept draft into the JSON checkpoint:\n\n{draft}"
+    if pm_context:
+        user_content = f"{pm_context}\n\n{user_content}"
+
+    base_msgs = [
+        {"role": "system", "content": _SYNTHESIS_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+
     llm = build_synthesis_llm()
 
     synthesis_model = os.getenv("OPENROUTER_MODEL_SYNTHESIS", "synthesis_model")
     log_pm_audit_event("Synthesis", "START", model=synthesis_model, run_id=run_id)
-
-    base_msgs = [
-        {"role": "system", "content": _SYNTHESIS_SYSTEM},
-        {"role": "user", "content": f"Convert this concept draft into the JSON checkpoint:\n\n{draft}"},
-    ]
 
     raw = llm.call(base_msgs)
     cleaned = _clean_json_response(raw)
@@ -343,9 +354,8 @@ def run_synthesis(run_id: str = "") -> dict:
 
         # Self-correction: one retry with the error fed back
         retry_msgs = base_msgs + [
-            {"role": "assistant", "content": raw},
             {"role": "user", "content": (
-                f"Your response failed validation: {err}\n"
+                f"Your previous response failed validation: {err}\n"
                 "Output ONLY the corrected JSON object. No explanation. No fences."
             )},
         ]
@@ -364,6 +374,7 @@ def run_synthesis(run_id: str = "") -> dict:
                 f"after 1 self-correction. Last error: {err2}"
             ) from err2
 
+    checkpoint = enrich_checkpoint_from_brief(checkpoint)
     content = json.dumps(checkpoint, indent=2, ensure_ascii=False)
     write_workspace_file("current/docs/concept_checkpoint.json", content)
 
@@ -413,19 +424,49 @@ def run_decision(kernel_data: dict | None = None, run_id: str = "") -> dict:
     decision_system = _DECISION_SYSTEM
     if kernel_data:
         decision_system = inject_kernel_guard(_DECISION_SYSTEM, kernel_data)
+    decision_system = append_cognitive_contract(decision_system)
 
-    blueprint_raw = llm.call([
+    from harness.cognitive_logger import record_cognitive_output
+
+    user_content = inject_cognitive_context(
+        run_id,
+        "Make decisions and write the blueprint based on this concept checkpoint:\n\n"
+        f"{checkpoint_summary}",
+    )
+    messages = [
         {"role": "system", "content": decision_system},
-        {"role": "user", "content": (
-            "Make decisions and write the blueprint based on this concept checkpoint:\n\n"
-            f"{checkpoint_summary}"
-        )},
-    ])
+        {"role": "user", "content": user_content},
+    ]
+
+    decision_graph: dict = {}
+    if cognitive_enabled():
+        blueprint_raw, cognitive = call_with_cognitive_retry(
+            llm, messages, "Decision",
+        )
+        decision_graph = cognitive.decision_graph
+        record_cognitive_output(
+            run_id, "Decision", cognitive.thinking_text, cognitive.decision_graph,
+            artifact="current/docs/blueprint.md",
+        )
+        blueprint_raw = cognitive.artifact_body
+    else:
+        blueprint_raw = llm.call(messages)
 
     meta = _extract_decision_meta(blueprint_raw)
+    meta["confidence"] = compute_decision_confidence(meta, decision_graph)
     clean_blueprint = _strip_decision_meta(blueprint_raw)
 
     write_workspace_file("current/docs/blueprint.md", clean_blueprint)
+    write_workspace_file(
+        "current/docs/decision_meta.json",
+        json.dumps({
+            "confidence": meta.get("confidence"),
+            "selected_decisions": meta.get("selected_decisions") or [],
+            "rejected_options": meta.get("rejected_options") or [],
+            "trade_offs": meta.get("trade_offs") or [],
+            "reasons": meta.get("reasons") or [],
+        }, indent=2, ensure_ascii=False),
+    )
 
     selected_str = ", ".join(meta.get("selected_decisions", []))[:120] or None
     rejected_str = ", ".join(meta.get("rejected_options", []))[:120] or None
@@ -456,6 +497,17 @@ def run_decision(kernel_data: dict | None = None, run_id: str = "") -> dict:
         output="current/docs/blueprint.md",
         summary_ko=meta.get("ko_log_summary"),
         run_id=run_id,
+    )
+    log_reasoning_event(
+        run_id=run_id, phase="Decision",
+        event_type="decision_completed",
+        domain="decision", category="selection",
+        artifact="current/docs/blueprint.md",
+        details={
+            "confidence": meta.get("confidence"),
+            "selected_count": len(meta.get("selected_decisions") or []),
+            "rejected_count": len(meta.get("rejected_options") or []),
+        },
     )
 
     return meta
@@ -490,8 +542,9 @@ def run_creative_production(kernel_data: dict | None = None, run_id: str = "") -
     # Call 1: founder_summary.md
     founder_raw = llm.call([
         {"role": "system", "content": founder_system},
-        {"role": "user", "content": (
-            f"Write the founder summary based on this blueprint:\n\n{blueprint}"
+        {"role": "user", "content": inject_cognitive_context(
+            run_id,
+            f"Write the founder summary based on this blueprint:\n\n{blueprint}",
         )},
     ])
     founder_meta = _extract_creative_meta(founder_raw)
@@ -501,10 +554,11 @@ def run_creative_production(kernel_data: dict | None = None, run_id: str = "") -
     # Call 2: feature_spec.md (receives both blueprint and founder summary for coherence)
     spec_raw = llm.call([
         {"role": "system", "content": spec_system},
-        {"role": "user", "content": (
+        {"role": "user", "content": inject_cognitive_context(
+            run_id,
             f"Blueprint:\n{blueprint}\n\n"
             f"Founder Summary:\n{clean_founder}\n\n"
-            "Write the feature specification."
+            "Write the feature specification.",
         )},
     ])
     spec_meta = _extract_creative_meta(spec_raw)
@@ -536,16 +590,9 @@ def run_creative_production(kernel_data: dict | None = None, run_id: str = "") -
 # ---------------------------------------------------------------------------
 # Phase 5 helper: backlog structural validation
 # NOTE: Soft validation (warn-only). Hard schema validation lives in
-# harness/schema_validator.py (HandoffSchema). Keep enum values and required
-# field rules in sync between these two locations when modifying either.
+# harness/schema_validator.py (HandoffSchema). Constants are imported from
+# there so enum values and required field rules have a single source of truth.
 # ---------------------------------------------------------------------------
-
-_VALID_OWNER = frozenset({"frontend", "backend", "fullstack", "qa"})
-_VALID_PRIORITY = frozenset({"high", "medium", "low"})
-_BACKLOG_REQUIRED_TASK_FIELDS = frozenset({
-    "id", "title", "owner", "priority", "dependencies",
-    "acceptance_criteria", "files_to_create", "files_to_modify", "notes",
-})
 
 
 def _validate_backlog(data: dict) -> list:
@@ -563,12 +610,12 @@ def _validate_backlog(data: dict) -> list:
     ids_seen = {t.get("id") for t in tasks if t.get("id")}
     for i, task in enumerate(tasks):
         prefix = f"tasks.{i}"
-        for field in _BACKLOG_REQUIRED_TASK_FIELDS:
+        for field in BACKLOG_REQUIRED_TASK_FIELDS:
             if field not in task:
                 errors.append(f"{prefix}: missing field '{field}'")
-        if task.get("owner") not in _VALID_OWNER:
+        if task.get("owner") not in VALID_OWNERS:
             errors.append(f"{prefix}.owner: invalid value '{task.get('owner')}'")
-        if task.get("priority") not in _VALID_PRIORITY:
+        if task.get("priority") not in VALID_PRIORITIES:
             errors.append(f"{prefix}.priority: invalid value '{task.get('priority')}'")
         if len(task.get("acceptance_criteria", [])) < 2:
             errors.append(f"{prefix}: acceptance_criteria must have >= 2 items")
@@ -711,6 +758,7 @@ def run_product_qa_gate(
             ensure_ascii=False,
         )
         context = f"## Founder Kernel\n{kernel_summary}\n\n" + context
+    context = inject_cognitive_context(run_id, context)
 
     raw = llm.call([
         {"role": "system", "content": _PRODUCT_QA_SYSTEM},
@@ -718,6 +766,7 @@ def run_product_qa_gate(
     ])
 
     result = _parse_json_phase(raw, {"overall_status": "warn", "failure_type": "none", "qa_results": [], "evidence_bindings": []}, "ProductQA")
+    result["confidence"] = compute_product_qa_confidence(result)
 
     # --- Evidence integrity validation ---
     integrity_violations = []
@@ -768,6 +817,18 @@ def run_product_qa_gate(
     write_workspace_file(
         "current/qa/product_qa_result.json",
         json.dumps(result, indent=2, ensure_ascii=False),
+    )
+    log_reasoning_event(
+        run_id=run_id, phase="ProductQA",
+        event_type="product_qa_completed",
+        domain="qa", category="validation",
+        artifact="current/qa/product_qa_result.json",
+        details={
+            "confidence": result.get("confidence"),
+            "overall_status": result.get("overall_status"),
+            "evidence_count": len(result.get("evidence_bindings") or []),
+        },
+        parent_event_id=parent_event_id,
     )
     log_pm_audit_event(
         "ProductQA", "END",
@@ -875,6 +936,7 @@ def run_strategic_qa_gate(
             ensure_ascii=False,
         )
         context = f"## Founder Kernel\n{kernel_summary}\n\n" + context
+    context = inject_cognitive_context(run_id, context)
 
     # Founder Preservation Check
     founder_llm = build_strategic_qa_llm()
@@ -931,6 +993,22 @@ def run_strategic_qa_gate(
         "current/qa/strategic_qa_result.json",
         json.dumps(combined, indent=2, ensure_ascii=False),
     )
+    log_reasoning_event(
+        run_id=run_id, phase="StrategicQA",
+        event_type="strategic_qa_completed",
+        domain="qa", category="validation",
+        artifact="current/qa/strategic_qa_result.json",
+        details={
+            "has_high_severity": combined["has_high_severity"],
+            "founder_verdict": founder_result.get("overall_verdict"),
+            "market_verdict": investor_result.get("overall_verdict"),
+            "failed_checks": [
+                c for c in founder_result.get("checks", []) + investor_result.get("checks", [])
+                if not c.get("passed", True) and c.get("finding")
+            ],
+        },
+        parent_event_id=qa_event_id,
+    )
     log_pm_audit_event(
         "StrategicQA", "END",
         risk="high_severity" if combined["has_high_severity"] else "none",
@@ -980,14 +1058,37 @@ def run_decision_council(
     council_system = _DECISION_COUNCIL_SYSTEM
     if kernel_data:
         council_system = inject_kernel_guard(_DECISION_COUNCIL_SYSTEM, kernel_data)
+    council_system = append_cognitive_contract(council_system)
+
+    from harness.cognitive_logger import record_cognitive_output
 
     llm = build_council_strategic_llm()
-    raw = llm.call([
+    council_user = inject_cognitive_context(
+        run_id,
+        f"Make the final MVP decision:\n\n{context}",
+    )
+    messages = [
         {"role": "system", "content": council_system},
-        {"role": "user", "content": f"Make the final MVP decision:\n\n{context}"},
-    ])
+        {"role": "user", "content": council_user},
+    ]
 
-    result = _parse_json_phase(raw, {"verdict": "needs_revision", "approved_mvp": [], "blockers": ["council_parse_failure"]}, "DecisionCouncil")
+    if cognitive_enabled():
+        raw, cognitive = call_with_cognitive_retry(llm, messages, "DecisionCouncil")
+        record_cognitive_output(
+            run_id, "DecisionCouncil", cognitive.thinking_text, cognitive.decision_graph,
+            artifact="current/decision/council_decision.json",
+            parent_event_id=parent_event_id,
+        )
+        parse_body = cognitive.artifact_body
+    else:
+        raw = llm.call(messages)
+        parse_body = raw
+
+    result = _parse_json_phase(
+        parse_body,
+        {"verdict": "needs_revision", "approved_mvp": [], "blockers": ["council_parse_failure"]},
+        "DecisionCouncil",
+    )
 
     # Non-linear confidence clamp: if any strategic QA high severity, force confidence <= 0.30
     if has_high_severity:
@@ -1105,21 +1206,22 @@ def run_validation_strategy_engine(
 
     val_result["failure_modes"] = failure_scenarios
 
-    # Log hypothesis events
-    val_event_id = parent_event_id
-    for hyp in val_result.get("core_hypothesis", []):
-        val_event_id = log_reasoning_event(
-            run_id=run_id, phase="ValidationEngine",
-            event_type="validation_warning",
-            domain="qa", category="validation",
-            artifact=hyp.get("id", "hypothesis"),
-            details={"kpi": hyp.get("kpi"), "signal_latency": hyp.get("signal_latency"), "decision_impact": hyp.get("decision_impact")},
-            parent_event_id=val_event_id,
-        )
-
     write_workspace_file(
         "current/validation/validation_strategy.json",
         json.dumps(val_result, indent=2, ensure_ascii=False),
+    )
+    log_reasoning_event(
+        run_id=run_id, phase="ValidationEngine",
+        event_type="validation_strategy_completed",
+        domain="qa", category="validation",
+        artifact="current/validation/validation_strategy.json",
+        details={
+            "hypothesis_count": len(val_result.get("core_hypothesis") or []),
+            "experiment_count": len(val_result.get("next_experiments") or []),
+            "ko_summary": val_result.get("ko_summary"),
+            "hypotheses": val_result.get("core_hypothesis") or [],
+        },
+        parent_event_id=parent_event_id,
     )
     log_pm_audit_event(
         "ValidationEngine", "END",
@@ -1156,16 +1258,8 @@ def run_consistency_guardrail(
     founder_summary = read_workspace_file("current/docs/founder_summary.md")
     log_pm_audit_event("ConsistencyGuardrail", "START", run_id=run_id)
 
-    kernel_summary = ""
-    if kernel_data:
-        kernel_summary = f"## Founder Kernel\n{json.dumps({k: v for k, v in kernel_data.items() if k != 'kernel_hash'}, ensure_ascii=False)}\n\n"
-
-    context = (
-        f"{kernel_summary}"
-        f"## Feature Spec\n{feature_spec}\n\n"
-        f"## Backlog\n{backlog_raw}\n\n"
-        f"## Validation Strategy\n{validation_raw}\n\n"
-        f"## Founder Summary\n{founder_summary}"
+    context = build_consistency_digest(
+        feature_spec, backlog_raw, validation_raw, founder_summary, kernel_data,
     )
 
     llm = build_consistency_llm()
@@ -1235,15 +1329,28 @@ def run_final_validation_and_patch(run_id: str = "") -> tuple:
 
         if attempts < max_retries:
             run_patch_crew("current/tech/handoff_to_dev.json", errors, run_id=run_id)
+            post_content = read_workspace_file("current/tech/handoff_to_dev.json")
+            post_valid, post_errors = validate_handoff(post_content)
+            log_reasoning_event(
+                run_id=run_id, phase="FinalValidation",
+                event_type="patch_applied" if post_valid else "patch_failed",
+                domain="qa", category="patching",
+                artifact="handoff_to_dev.json",
+                details={
+                    "attempt": attempts,
+                    "remaining_errors": [] if post_valid else post_errors,
+                },
+            )
 
     return False, {"attempts": attempts, "errors": errors}
 
 
-def run_planning():
+def run_planning(run_id: str | None = None):
     """Phase-based MVP planning workflow (v4).
 
     Execution order:
       0. load_founder_kernel()     — founder_kernel.json (create template if missing)
+      0.5 run_intent_review()      — Layer 0.5 founder gate (reject → partial archive + halt)
       1. run_idea_loop()           — concept_draft.md + kernel guard
       2. run_synthesis()           — concept_checkpoint.json
       3. run_decision()            — blueprint.md + kernel guard
@@ -1259,30 +1366,68 @@ def run_planning():
      13. ensure_founder_summary_korean()
      14. create_archive_snapshot()
     """
-    run_id = str(uuid.uuid4())
-    log_pm_audit_event("Workflow", "START", run_id=run_id)
-    log_reasoning_event(
-        run_id=run_id, phase="Workflow", event_type="run_start",
-        domain="workflow", category="lifecycle",
-        artifact="run_start", details={"run_id": run_id},
-    )
+    run_id = run_id or str(uuid.uuid4())
 
-    # Load and verify founder kernel
+    # Load and verify founder kernel before emitting run_start so that
+    # kernel_hash_prefix is available as meaningful metadata in the event.
     kernel_data = load_founder_kernel()
     save_founder_kernel(kernel_data)  # ensures hash is stamped
     kernel_hash = kernel_data.get("kernel_hash", "")
     log_pm_audit(f"KernelGuard | Status=LOADED | Hash={kernel_hash[:12]}...")
+    log_reasoning_event(
+        run_id=run_id, phase="Workflow", event_type="run_start",
+        domain="workflow", category="lifecycle",
+        artifact="run_start", details={"kernel_hash_prefix": kernel_hash[:12]},
+    )
+
+    # Layer 0.5: Founder Intent Review Gate (skipped when model unset).
+    # reject → partial archive (kernel/ + review json) and ok=False return,
+    # BEFORE any downstream pipeline phase consumes tokens.
+    print("Layer 0.5: Founder Intent Review Gate")
+    gate = run_intent_review(kernel_data, run_id=run_id)
+    if gate["choice"] == "reject":
+        print("Intent Review: founder rejected the kernel. Halting before pipeline.")
+        log_pm_audit(f"Workflow | Status=INTENT_REJECTED | verdict={gate.get('verdict')}")
+        log_pm_audit_event("Workflow", "END", risk="intent_rejected", run_id=run_id)
+        ensure_decisions_korean(run_id=run_id)
+        snapshot = create_archive_snapshot("intent_rejected", run_id=run_id)
+        print(f"Partial archive (kernel + review) at {snapshot}")
+        return {
+            "ok": False,
+            "rejected": True,
+            "risk": None,
+            "attempts": 0,
+            "errors": [],
+            "verdict": gate.get("verdict"),
+            "run_id": run_id,
+        }
+    # 'edit' resolves to proceed with the updated kernel.
+    kernel_data = gate["kernel_data"]
+    kernel_hash = kernel_data.get("kernel_hash", kernel_hash)
+
+    # Layer 1: PM Discovery — reconstruction (default) or legacy upstream trio
+    if reconstruction_enabled():
+        print("Layer 1: PM Reconstruction")
+        run_pm_reconstruction(
+            kernel_data=kernel_data,
+            run_id=run_id,
+            intent_review=gate.get("review"),
+        )
+        assert_kernel_integrity(kernel_data, "post-PMReconstruction")
+    elif upstream_enabled():
+        print("Layer 1: User Definition")
+        run_user_definition(kernel_data=kernel_data, run_id=run_id)
+        assert_kernel_integrity(kernel_data, "post-UserDefinition")
+        print("Layer 2: Problem Discovery")
+        run_problem_discovery(run_id=run_id)
+        print("Layer 3: Opportunity Sizing")
+        run_opportunity_sizing(kernel_data=kernel_data, run_id=run_id)
 
     translation_checked = False
     workflow_event_id = None
 
     try:
         print("Phase 1: Idea Loop")
-        workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="IdeaLoop", event_type="phase_start",
-            domain="workflow", category="lifecycle",
-            artifact="raw_ideas", details={"step": "start"}, parent_event_id=workflow_event_id,
-        )
         run_idea_loop(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
         assert_kernel_integrity(kernel_data, "post-IdeaLoop")
 
@@ -1295,23 +1440,9 @@ def run_planning():
 
         print("Phase v4-B6: Product QA Gate")
         qa_result = run_product_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
-        workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="ProductQA", event_type="phase_end",
-            domain="workflow", category="lifecycle",
-            artifact="product_qa_result",
-            details={"overall_status": qa_result.get("overall_status")},
-            parent_event_id=workflow_event_id,
-        )
 
         print("Phase v4-C7: Strategic QA Gate")
         strategic_result = run_strategic_qa_gate(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
-        workflow_event_id = log_reasoning_event(
-            run_id=run_id, phase="StrategicQA", event_type="phase_end",
-            domain="workflow", category="lifecycle",
-            artifact="strategic_qa_result",
-            details={"has_high_severity": strategic_result.get("has_high_severity", False)},
-            parent_event_id=workflow_event_id,
-        )
 
         print("Phase v4-C8: Decision Council")
         council_result = run_decision_council(kernel_data=kernel_data, run_id=run_id, parent_event_id=workflow_event_id)
@@ -1387,6 +1518,7 @@ def run_planning():
             snapshot_tag = "todo_mvp"
 
         ensure_founder_summary_korean(run_id=run_id)
+        ensure_decisions_korean(run_id=run_id)
         translation_checked = True
 
         snapshot = create_archive_snapshot(snapshot_tag, run_id=run_id)
@@ -1426,4 +1558,5 @@ def run_planning():
     finally:
         if not translation_checked:
             ensure_founder_summary_korean(run_id=run_id)
+            ensure_decisions_korean(run_id=run_id)
 

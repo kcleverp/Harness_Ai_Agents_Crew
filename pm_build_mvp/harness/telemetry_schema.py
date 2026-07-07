@@ -26,7 +26,8 @@ Schema version: v1
   qa         / validation   → schema_mismatch, validation_warning, validation_passed
              / patching     → patch_applied, patch_failed
              / integrity    → system_integrity_alert, fabricated_founder_evidence,
-                              kernel_violation, malformed_lineage, invalid_escalation
+                              kernel_violation, malformed_lineage, invalid_escalation,
+                              schema_violation
              / escalation   → escalation_triggered, escalation_resolved
              / consistency  → consistency_check_passed, consistency_check_failed
   system     / kernel       → kernel_hash_verified, kernel_hash_mismatch, kernel_loaded,
@@ -76,8 +77,8 @@ OUT OF SCOPE (future):
   - Temporal queries (e.g. "state at time T")
 
 REPLAY GUARANTEE:
-  For any run_id, verify_run_reconstruction(run_id) must return ok=True with
-  hash-stable projection outputs. Same canonical input → same hashes.
+  Projection regeneration must remain deterministic with hash-stable outputs.
+  Same canonical input + same projection version → same hashes.
   This is the minimum bar for "replay-ready" status.
 
 ═══════════════════════════════════════════════════════════════
@@ -104,7 +105,18 @@ Priority guardrail:
 
 from __future__ import annotations
 
+import os
+import warnings
+
 SCHEMA_VERSION = "v1"
+
+# ---------------------------------------------------------------------------
+# Lenient mode — set PM_TELEMETRY_LENIENT=1 to downgrade unknown
+# domain/category pairs from SchemaValidationError to a warning.
+# Default is strict (empty string → False).
+# Use only during experimental iteration; revert before production runs.
+# ---------------------------------------------------------------------------
+LENIENT_MODE: bool = os.getenv("PM_TELEMETRY_LENIENT", "").lower() in ("1", "true")
 
 # ---------------------------------------------------------------------------
 # Taxonomy registry
@@ -122,18 +134,25 @@ DOMAIN_TAXONOMY: dict[str, dict[str, list[str]]] = {
         "selection": [
             "option_selected", "option_rejected",
             "critique_generated", "conflict_detected",
+            "thinking_recorded",
+            "intent_review_completed", "intent_choice",
+            "intent_proceed", "intent_reject",
+            "decision_completed",
+            "idea_loop_completed",
         ],
         "tradeoff": [
             "tradeoff_recorded", "confidence_penalty_applied",
             "council_approved", "council_rejected",
+            "decision_graph_recorded",
         ],
     },
     "qa": {
-        "validation": ["schema_mismatch", "validation_warning", "validation_passed"],
+        "validation": ["schema_mismatch", "validation_warning", "validation_passed", "product_qa_completed", "strategic_qa_completed", "validation_strategy_completed"],
         "patching":   ["patch_applied", "patch_failed"],
         "integrity":  [
             "system_integrity_alert", "fabricated_founder_evidence",
             "kernel_violation", "malformed_lineage", "invalid_escalation",
+            "schema_violation",
         ],
         "escalation": ["escalation_triggered", "escalation_resolved"],
         "consistency": ["consistency_check_passed", "consistency_check_failed"],
@@ -153,6 +172,11 @@ DOMAIN_TAXONOMY: dict[str, dict[str, list[str]]] = {
             "translation_generated", "translation_skipped",
             "translation_stale", "translation_failed",
         ],
+    },
+    "discovery": {
+        "user": ["user_model_generated", "jtbd_extracted", "persona_defined"],
+        "problem": ["problem_statement_created", "friction_identified"],
+        "opportunity": ["opportunity_scored", "opportunity_prioritized", "pm_reconstruction_completed"],
     },
 }
 
@@ -190,11 +214,26 @@ def validate_event(event: dict) -> None:
         )
     domain = event["domain"]
     if domain not in DOMAIN_TAXONOMY:
+        if LENIENT_MODE:
+            warnings.warn(
+                f"Unregistered domain {domain!r} (LENIENT_MODE on; event will be written). "
+                f"Valid: {list(DOMAIN_TAXONOMY)}",
+                stacklevel=3,
+            )
+            return
         raise SchemaValidationError(
             f"Unknown domain {domain!r}. Valid: {list(DOMAIN_TAXONOMY)}"
         )
     category = event["category"]
     if category not in DOMAIN_TAXONOMY[domain]:
+        if LENIENT_MODE:
+            warnings.warn(
+                f"Unregistered category {category!r} under domain {domain!r} "
+                f"(LENIENT_MODE on; event will be written). "
+                f"Valid: {list(DOMAIN_TAXONOMY[domain])}",
+                stacklevel=3,
+            )
+            return
         raise SchemaValidationError(
             f"Unknown category {category!r} under domain {domain!r}. "
             f"Valid: {list(DOMAIN_TAXONOMY[domain])}"
@@ -208,40 +247,3 @@ def is_valid_event(event: dict) -> bool:
         return True
     except SchemaValidationError:
         return False
-
-
-# ---------------------------------------------------------------------------
-# Builder
-# ---------------------------------------------------------------------------
-
-def build_event(
-    *,
-    run_id: str,
-    phase: str,
-    domain: str,
-    category: str,
-    event_type: str,
-    event_id: str,
-    timestamp: str,
-    parent_event_id: str | None = None,
-    related_event_ids: list[str] | None = None,
-    artifact: str | None = None,
-    details: dict | None = None,
-) -> dict:
-    """Construct and validate a canonical event record."""
-    record = {
-        "schema_version": SCHEMA_VERSION,
-        "event_id": event_id,
-        "parent_event_id": parent_event_id,
-        "related_event_ids": related_event_ids if related_event_ids is not None else [],
-        "run_id": run_id,
-        "phase": phase,
-        "domain": domain,
-        "category": category,
-        "event_type": event_type,
-        "artifact": artifact,
-        "timestamp": timestamp,
-        "details": details or {},
-    }
-    validate_event(record)
-    return record

@@ -2,32 +2,22 @@ import json
 import os
 import uuid
 import datetime
-import warnings
 from typing import Optional
 
+from harness.role_registry import resolve_role
 from harness.telemetry_schema import SCHEMA_VERSION, validate_event, SchemaValidationError
+from harness import event_stream
 
 # ---------------------------------------------------------------------------
-# Transition compatibility policy
+# Frozen legacy logs
 #
-# The following phase-centric log files are in TRANSITION (deprecated):
-#   decision_history.log  blueprint_logic.log  creative_process.log  patch_actions.log
-#
-# These files continue to be written for backward compatibility during the
-# transition period, but callers SHOULD pass run_id so that the canonical
-# stream (reasoning_trace.jsonl) is the primary write target.
-#
-# Transition end: when all callers pass run_id, legacy file writes will be removed.
+# Phase-centric .log files were frozen at cutover v2.
+# Pre-cutover content is preserved as *.legacy_pre_v2.log on disk and is
+# not written to by current code. All new events are emitted exclusively
+# to reasoning_trace.jsonl (canonical stream, schema v1).
 # ---------------------------------------------------------------------------
 
-_DEPRECATED_DIRECT_LOGS = frozenset({
-    "decision_history.log",
-    "blueprint_logic.log",
-    "creative_process.log",
-    "patch_actions.log",
-})
-
-LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs"))
+from harness.paths import LOG_DIR
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
@@ -102,18 +92,43 @@ def log_reasoning_event(
     try:
         validate_event(record)
     except SchemaValidationError as schema_err:
-        warnings.warn(
-            f"Telemetry schema violation (event will still be written): {schema_err}",
-            stacklevel=2,
-        )
+        # Write-level rejection only:
+        #   - the offending record is NOT written to canonical
+        #   - a schema_violation meta event is emitted in its place
+        #   - this function returns normally; the caller (and the run) continues
+        # domain=qa / category=integrity is registered in DOMAIN_TAXONOMY.
+        meta_record = {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": str(uuid.uuid4()),
+            "parent_event_id": parent_event_id,
+            "related_event_ids": [],
+            "run_id": run_id,
+            "phase": phase,
+            "domain": "qa",
+            "category": "integrity",
+            "event_type": "schema_violation",
+            "artifact": None,
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "details": {
+                "rejected_event_type": event_type,
+                "error": str(schema_err),
+            },
+        }
+        meta_line = json.dumps(meta_record, ensure_ascii=False)
+        with open(os.path.join(LOG_DIR, "reasoning_trace.jsonl"), "a", encoding="utf-8") as f:
+            f.write(meta_line + "\n")
+        event_stream.publish(meta_record)
+        return meta_record["event_id"]
     line = json.dumps(record, ensure_ascii=False)
     with open(os.path.join(LOG_DIR, "reasoning_trace.jsonl"), "a", encoding="utf-8") as f:
         f.write(line + "\n")
+    event_stream.publish(record)
     return event_id
 
 
 # ---------------------------------------------------------------------------
-# Technical logs — run_summary.log
+# Operational summary log — run_summary.log
+# Written for human grep/tail use. Kept in dual-write with canonical stream.
 # ---------------------------------------------------------------------------
 
 def log_run_summary(
@@ -153,7 +168,8 @@ def log_run_summary(
 
 
 # ---------------------------------------------------------------------------
-# Technical logs — validation_failures.log
+# Operational summary log — validation_failures.log
+# Written for human grep/tail use. Kept in dual-write with canonical stream.
 # ---------------------------------------------------------------------------
 
 def log_validation_error(
@@ -183,49 +199,8 @@ def log_validation_error(
 
 
 # ---------------------------------------------------------------------------
-# Technical logs — patch_actions.log
-# ---------------------------------------------------------------------------
-
-def log_patch_action(
-    filename: str,
-    patch_target: str,
-    result: str,
-    error_code: str = "PATCH_ATTEMPT",
-    run_id: Optional[str] = None,
-    phase: Optional[str] = None,
-    parent_event_id: Optional[str] = None,
-):
-    """Record a patch operation.
-
-    Canonical emit (when run_id provided): domain=qa, category=patching.
-    Legacy text log (patch_actions.log) written for compatibility — DEPRECATED.
-    Pass run_id to suppress this warning and emit to canonical stream only.
-    """
-    msg = _fmt(File=filename, Target=patch_target, Code=error_code, Result=result)
-    append_log("patch_actions.log", msg)
-    if not run_id:
-        warnings.warn(
-            "log_patch_action called without run_id — writing to legacy patch_actions.log only. "
-            "Pass run_id to emit to canonical stream.",
-            DeprecationWarning, stacklevel=2,
-        )
-
-    if run_id:
-        event_type = "patch_applied" if "success" in result.lower() else "patch_failed"
-        log_reasoning_event(
-            run_id=run_id,
-            phase=phase or "patching",
-            event_type=event_type,
-            domain="qa",
-            category="patching",
-            artifact=filename,
-            details={"patch_target": patch_target, "result": result, "error_code": error_code},
-            parent_event_id=parent_event_id,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Operational logs — pm_audit.log
+# Operational summary log — pm_audit.log
+# Written for human grep/tail use. Kept in dual-write with canonical stream.
 # ---------------------------------------------------------------------------
 
 def log_pm_audit(message: str):
@@ -244,11 +219,13 @@ def log_pm_audit_event(
     summary_ko: Optional[str] = None,
     run_id: Optional[str] = None,
     parent_event_id: Optional[str] = None,
-):
+) -> Optional[str]:
     """Structured phase lifecycle event.
 
     Canonical emit (when run_id provided): domain=workflow, category=lifecycle.
     Legacy text log (pm_audit.log) always written for compatibility.
+
+    Returns event_id when a canonical event was emitted, else None.
     """
     msg = _fmt(
         Phase=phase, Status=status, Model=model,
@@ -259,7 +236,8 @@ def log_pm_audit_event(
 
     if run_id:
         event_type = "phase_start" if status.upper() == "START" else "phase_end"
-        log_reasoning_event(
+        role = resolve_role(phase)
+        return log_reasoning_event(
             run_id=run_id,
             phase=phase,
             event_type=event_type,
@@ -268,11 +246,13 @@ def log_pm_audit_event(
             artifact=output,
             details={
                 "status": status, "model": model,
+                "role": role["title_ko"],
                 "selected": selected, "rejected": rejected,
                 "risk": risk, "summary_ko": summary_ko,
             },
             parent_event_id=parent_event_id,
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -291,28 +271,18 @@ def log_decision_history(
     """Record a rejected option and its rationale.
 
     Canonical emit (when run_id provided): domain=decision, category=selection.
-    Legacy text log (decision_history.log) written for compatibility — DEPRECATED.
-    Pass run_id to suppress this warning and emit to canonical stream only.
     """
-    msg = _fmt(Phase=phase, Rejected=rejected, Reason=reason, Risk=risk, SummaryKo=summary_ko)
-    append_log("decision_history.log", msg)
     if not run_id:
-        warnings.warn(
-            "log_decision_history called without run_id — writing to legacy decision_history.log only. "
-            "Pass run_id to emit to canonical stream.",
-            DeprecationWarning, stacklevel=2,
-        )
-
-    if run_id:
-        log_reasoning_event(
-            run_id=run_id,
-            phase=phase,
-            event_type="option_rejected",
-            domain="decision",
-            category="selection",
-            details={"rejected": rejected, "reason": reason, "risk": risk, "summary_ko": summary_ko},
-            parent_event_id=parent_event_id,
-        )
+        return
+    log_reasoning_event(
+        run_id=run_id,
+        phase=phase,
+        event_type="option_rejected",
+        domain="decision",
+        category="selection",
+        details={"rejected": rejected, "reason": reason, "risk": risk, "summary_ko": summary_ko},
+        parent_event_id=parent_event_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,34 +302,21 @@ def log_blueprint_logic(
     """Record Decision-phase structural/technical choices.
 
     Canonical emit (when run_id provided): domain=decision, category=tradeoff.
-    Legacy text log (blueprint_logic.log) written for compatibility — DEPRECATED.
-    Pass run_id to suppress this warning and emit to canonical stream only.
     """
-    msg = _fmt(
-        Phase=phase, Selected=selected, Rejected=rejected,
-        TradeOff=trade_off, Reason=reason, SummaryKo=summary_ko,
-    )
-    append_log("blueprint_logic.log", msg)
     if not run_id:
-        warnings.warn(
-            "log_blueprint_logic called without run_id — writing to legacy blueprint_logic.log only. "
-            "Pass run_id to emit to canonical stream.",
-            DeprecationWarning, stacklevel=2,
-        )
-
-    if run_id:
-        log_reasoning_event(
-            run_id=run_id,
-            phase=phase,
-            event_type="tradeoff_recorded",
-            domain="decision",
-            category="tradeoff",
-            details={
-                "selected": selected, "rejected": rejected,
-                "trade_off": trade_off, "reason": reason, "summary_ko": summary_ko,
-            },
-            parent_event_id=parent_event_id,
-        )
+        return
+    log_reasoning_event(
+        run_id=run_id,
+        phase=phase,
+        event_type="tradeoff_recorded",
+        domain="decision",
+        category="tradeoff",
+        details={
+            "selected": selected, "rejected": rejected,
+            "trade_off": trade_off, "reason": reason, "summary_ko": summary_ko,
+        },
+        parent_event_id=parent_event_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -378,28 +335,18 @@ def log_creative_process(
     """Record Creative Production narrative direction choices.
 
     Canonical emit (when run_id provided): domain=decision, category=selection.
-    Legacy text log (creative_process.log) written for compatibility — DEPRECATED.
-    Pass run_id to suppress this warning and emit to canonical stream only.
     """
-    msg = _fmt(Phase=phase, Selected=selected, Rejected=rejected, Reason=reason, SummaryKo=summary_ko)
-    append_log("creative_process.log", msg)
     if not run_id:
-        warnings.warn(
-            "log_creative_process called without run_id — writing to legacy creative_process.log only. "
-            "Pass run_id to emit to canonical stream.",
-            DeprecationWarning, stacklevel=2,
-        )
-
-    if run_id:
-        log_reasoning_event(
-            run_id=run_id,
-            phase=phase,
-            event_type="option_selected",
-            domain="decision",
-            category="selection",
-            details={"selected": selected, "rejected": rejected, "reason": reason, "summary_ko": summary_ko},
-            parent_event_id=parent_event_id,
-        )
+        return
+    log_reasoning_event(
+        run_id=run_id,
+        phase=phase,
+        event_type="option_selected",
+        domain="decision",
+        category="selection",
+        details={"selected": selected, "rejected": rejected, "reason": reason, "summary_ko": summary_ko},
+        parent_event_id=parent_event_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,24 +382,3 @@ def log_system_integrity_alert(
     )
 
 
-def log_founder_override(
-    run_id: str,
-    phase: str,
-    reason: str,
-    override_details: Optional[dict] = None,
-    parent_event_id: Optional[str] = None,
-) -> str:
-    """Founder override event (AI average prevention).
-
-    domain=system / category=kernel / event_type=founder_override.
-    """
-    return log_reasoning_event(
-        run_id=run_id,
-        phase=phase,
-        event_type="founder_override",
-        domain="system",
-        category="kernel",
-        artifact="founder_kernel",
-        details={"reason": reason, **(override_details or {})},
-        parent_event_id=parent_event_id,
-    )

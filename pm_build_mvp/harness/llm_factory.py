@@ -13,12 +13,12 @@ _ROLE_ENV_VARS: dict[str, str] = {
     "creative":          "OPENROUTER_MODEL_CREATIVE",
     "tech_gen":          "OPENROUTER_MODEL_TECH_GEN",
     "tech_review":       "OPENROUTER_MODEL_TECH_REVIEW",
+    # Layer 0.5 — Founder Intent Review Gate
+    "intent_review":     "OPENROUTER_MODEL_INTENT_REVIEW",
     # v4 additions
     "strategic_qa":      "OPENROUTER_MODEL_STRATEGIC_QA",
     "investor_qa":       "OPENROUTER_MODEL_INVESTOR_QA",
     "council_strategic": "OPENROUTER_MODEL_COUNCIL_STRATEGIC",
-    "council_execution": "OPENROUTER_MODEL_COUNCIL_EXECUTION",
-    "council_simple":    "OPENROUTER_MODEL_COUNCIL_SIMPLE",
     "validation":        "OPENROUTER_MODEL_VALIDATION",
     "failure_scenario":  "OPENROUTER_MODEL_FAILURE_SCENARIO",
     "consistency":       "OPENROUTER_MODEL_CONSISTENCY",
@@ -26,14 +26,20 @@ _ROLE_ENV_VARS: dict[str, str] = {
     "escalation_logic":  "OPENROUTER_MODEL_ESCALATION_LOGIC",
     "escalation_ops":    "OPENROUTER_MODEL_ESCALATION_OPS",
     "escalation_spec":   "OPENROUTER_MODEL_ESCALATION_SPEC",
+    # Layer 1~3 upstream discovery (optional)
+    "user_def":          "OPENROUTER_MODEL_USER_DEF",
+    "problem_discovery": "OPENROUTER_MODEL_PROBLEM",
+    "opportunity":       "OPENROUTER_MODEL_OPPORTUNITY",
 }
 
 # v4 roles that are optional during startup validation (warn, do not fail)
 _OPTIONAL_ROLES: frozenset[str] = frozenset({
+    "intent_review",
     "strategic_qa", "investor_qa",
-    "council_strategic", "council_execution", "council_simple",
+    "council_strategic",
     "validation", "failure_scenario", "consistency",
     "escalation_logic", "escalation_ops", "escalation_spec",
+    "user_def", "problem_discovery", "opportunity",
 })
 
 
@@ -59,7 +65,12 @@ def _apply_openrouter_prefix(model: str, base_url: str) -> str:
     return model
 
 
-def _build_role_llm(env_var: str) -> LLM:
+def _build_role_llm(
+    env_var: str,
+    *,
+    temperature: float | None = None,
+    top_k: int | None = None,
+) -> LLM:
     """Build an LLM for a specific role from its dedicated env var.
 
     Raises ValueError if the env var is missing or empty.
@@ -73,7 +84,12 @@ def _build_role_llm(env_var: str) -> LLM:
             "Set the correct OpenRouter model slug in .env before running."
         )
     model = _apply_openrouter_prefix(model, base_url)
-    return LLM(api_key=api_key, base_url=base_url, model=model)
+    llm_kwargs: dict = {"api_key": api_key, "base_url": base_url, "model": model}
+    if temperature is not None:
+        llm_kwargs["temperature"] = temperature
+    if top_k is not None:
+        llm_kwargs["top_k"] = top_k
+    return LLM(**llm_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +98,12 @@ def _build_role_llm(env_var: str) -> LLM:
 
 def build_idea_llm() -> LLM:
     """Phase 1 — Idea generation/revision (low-cost, e.g. gemini-2.5-flash)."""
-    return _build_role_llm("OPENROUTER_MODEL_IDEA")
+    return _build_role_llm("OPENROUTER_MODEL_IDEA", temperature=1.0)
 
 
 def build_idea_critic_llm() -> LLM:
     """Phase 1 — Idea critique (low-cost, e.g. gpt-4o-mini / gpt-5-mini)."""
-    return _build_role_llm("OPENROUTER_MODEL_IDEA_CRITIC")
+    return _build_role_llm("OPENROUTER_MODEL_IDEA_CRITIC", temperature=0)
 
 
 def build_synthesis_llm() -> LLM:
@@ -112,12 +128,17 @@ def build_technical_gen_llm() -> LLM:
 
 def build_technical_review_llm() -> LLM:
     """Phase 5 — Technical review/correction planning (low-cost, e.g. gpt-4o-mini)."""
-    return _build_role_llm("OPENROUTER_MODEL_TECH_REVIEW")
+    return _build_role_llm("OPENROUTER_MODEL_TECH_REVIEW", temperature=0)
 
 
 # ---------------------------------------------------------------------------
 # v4 factory functions
 # ---------------------------------------------------------------------------
+
+def build_intent_review_llm() -> LLM:
+    """Layer 0.5 — Founder Intent Review Gate (strong model, e.g. claude-opus / gpt-5)."""
+    return _build_role_llm("OPENROUTER_MODEL_INTENT_REVIEW")
+
 
 def build_strategic_qa_llm() -> LLM:
     """Phase C — Strategic QA: Founder Preservation Check (e.g. claude-sonnet-4.6)."""
@@ -132,16 +153,6 @@ def build_investor_qa_llm() -> LLM:
 def build_council_strategic_llm() -> LLM:
     """Phase C — Decision Council: Strategic Judgment (e.g. claude-opus-4.6)."""
     return _build_role_llm("OPENROUTER_MODEL_COUNCIL_STRATEGIC")
-
-
-def build_council_execution_llm() -> LLM:
-    """Phase C — Decision Council: Execution Realism (e.g. gpt-5.5)."""
-    return _build_role_llm("OPENROUTER_MODEL_COUNCIL_EXECUTION")
-
-
-def build_council_simple_llm() -> LLM:
-    """Phase C — Decision Council: Simplification (e.g. gpt-5-mini)."""
-    return _build_role_llm("OPENROUTER_MODEL_COUNCIL_SIMPLE")
 
 
 def build_validation_llm() -> LLM:
@@ -174,6 +185,31 @@ def build_escalation_spec_llm() -> LLM:
     return _build_role_llm("OPENROUTER_MODEL_ESCALATION_SPEC")
 
 
+def build_user_definition_llm() -> LLM:
+    """Layer 1 — User definition from signals (optional)."""
+    return _build_role_llm("OPENROUTER_MODEL_USER_DEF")
+
+
+def build_problem_discovery_llm() -> LLM:
+    """Layer 2 — Problem discovery from user model (optional)."""
+    return _build_role_llm("OPENROUTER_MODEL_PROBLEM")
+
+
+def build_opportunity_sizing_llm() -> LLM:
+    """Layer 3 — Opportunity sizing (optional)."""
+    return _build_role_llm("OPENROUTER_MODEL_OPPORTUNITY")
+
+
+def build_pm_reconstruction_llm() -> LLM:
+    """PM Reconstruction — persona / problem / opportunity from kernel + intent review."""
+    model_key = "OPENROUTER_MODEL_PM_RECON"
+    if not os.getenv(model_key, "").strip():
+        if os.getenv("OPENROUTER_MODEL_USER_DEF", "").strip():
+            return build_user_definition_llm()
+        return build_strategic_qa_llm()
+    return _build_role_llm(model_key)
+
+
 # ---------------------------------------------------------------------------
 # Translator (post-process Korean translation — existing path kept)
 # ---------------------------------------------------------------------------
@@ -181,12 +217,15 @@ def build_escalation_spec_llm() -> LLM:
 def build_translator_llm_from_env() -> LLM:
     """Translator-only LLM (Gemini Flash or equivalent fast/cheap model).
 
+    Uses temperature=0 only — no top_k/top_p (OpenRouter/Gemini rejects top_k).
+
     Priority:
       1. OPENROUTER_TRANSLATOR_MODEL env var
       2. OPENROUTER_MODEL_IDEA (also flash-class) as fallback
-      3. build_llm_from_env() as last resort
 
     API key and base URL are always reused from the primary env vars.
+    Raises RuntimeError if neither env var is set (should be caught by
+    validate_llm_env() at startup).
     """
     api_key, base_url = _pick_connection()
     translator_model = (
@@ -195,33 +234,17 @@ def build_translator_llm_from_env() -> LLM:
     )
     if translator_model:
         translator_model = _apply_openrouter_prefix(translator_model, base_url)
-        return LLM(api_key=api_key, base_url=base_url, model=translator_model)
+        return LLM(
+            api_key=api_key, base_url=base_url, model=translator_model,
+            temperature=0,
+        )
 
-    print("[translator] No translator model found — falling back to build_llm_from_env()")
-    return build_llm_from_env()
-
-
-# ---------------------------------------------------------------------------
-# Legacy / backward compat (used by patch_engine.py only)
-# ---------------------------------------------------------------------------
-
-def _pick_env():
-    """Legacy helper — kept for backward compat with patch_engine.py."""
-    api_key, base_url = _pick_connection()
-    model = os.getenv("OPENROUTER_MODEL") or os.getenv("OPENAI_MODEL_NAME") or ""
-    return api_key, base_url, model
-
-
-def build_llm_from_env() -> LLM:
-    """Legacy. No active callers.
-
-    Still reads OPENROUTER_MODEL for backward compat.
-    New phase code must use the role-specific build_*_llm() functions instead.
-    """
-    api_key, base_url, model = _pick_env()
-    if model:
-        model = _apply_openrouter_prefix(model, base_url)
-    return LLM(api_key=api_key, base_url=base_url, model=model)
+    # This branch is unreachable: validate_llm_env() halts startup when
+    # OPENROUTER_MODEL_IDEA is absent, so the or-chain above always resolves.
+    raise RuntimeError(
+        "[translator] Neither OPENROUTER_TRANSLATOR_MODEL nor OPENROUTER_MODEL_IDEA "
+        "is set — this path should have been caught by validate_llm_env() at startup."
+    )
 
 
 # ---------------------------------------------------------------------------

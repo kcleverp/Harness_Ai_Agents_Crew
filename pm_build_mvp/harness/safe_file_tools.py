@@ -2,8 +2,7 @@ import os
 import json
 from crewai.tools import tool
 
-WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../workspace"))
-CURRENT_DIR = os.path.abspath(os.path.join(WORKSPACE_DIR, "current"))
+from harness.paths import WORKSPACE_DIR, CURRENT_DIR
 ALLOWED_EXTENSIONS = (".md", ".json")
 
 def _normalize_under_workspace(relative_path: str) -> str:
@@ -134,11 +133,6 @@ def patch_workspace_json(file_path: str, key_path: str, new_value_json: str) -> 
 def safe_read(file_path: str) -> str:
     """Reads a .md or .json file safely from workspace/. Provide relative path like current/handoff_to_dev.json."""
     return read_workspace_file(file_path)
-
-@tool("Safe File Writer Tool")
-def safe_write(file_path: str, content: str) -> str:
-    """Writes content strictly to workspace/current/ for .md/.json files."""
-    return write_workspace_file(file_path, content)
 
 @tool("Apply Partial JSON Patch Tool")
 def apply_partial_patch(file_path: str, key_path: str, new_value_json: str) -> str:

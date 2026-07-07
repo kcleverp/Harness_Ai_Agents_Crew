@@ -37,7 +37,6 @@ Layer definitions:
      Regeneration MUST be deterministic:
        same canonical input + same projection version → hash-equivalent output.
      Sort key: (timestamp, event_id) — stable regardless of insertion order.
-     Verification: verify_run_reconstruction() computes and returns SHA-256 hashes.
 
   4. SEMANTIC ISOLATION
      Projections filter events by domain/category/event_type directly.
@@ -61,19 +60,15 @@ Layer definitions:
  USAGE
 ═══════════════════════════════════════════════════════════════
 
-  from harness.telemetry_projection import generate_all_projections, verify_run_reconstruction
+  from harness.telemetry_projection import generate_all_projections
 
   generate_all_projections()                  # full stream
   generate_all_projections(run_id="abc123")   # single run slice
-
-  result = verify_run_reconstruction(run_id="abc123")
-  # result["ok"] → bool
-  # result["hashes"] → {"runtime": ..., "decisions": ..., "qa": ..., "all": ...}
-  # result["anomalies"] → list of issues found
 """
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -82,10 +77,22 @@ from typing import Optional
 
 from harness.telemetry_schema import is_valid_event
 
-_LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs"))
-_PROJ_DIR = os.path.join(_LOG_DIR, "projections")
-_VIEW_DIR = os.path.join(_LOG_DIR, "views")
-_CANONICAL = os.path.join(_LOG_DIR, "reasoning_trace.jsonl")
+from harness.paths import LOG_DIR as _LOG_DIR, PROJ_DIR as _PROJ_DIR, VIEW_DIR as _VIEW_DIR, CANONICAL_TRACE as _CANONICAL
+
+# Increment when projection format or filter logic changes so operators can
+# trace hash differences back to a code version rather than data changes.
+PROJECTION_VERSION = "1.0"
+
+
+def _canonical_file_hash() -> str:
+    """SHA-256 of the raw canonical stream bytes. Returns 'none' if file absent."""
+    if not os.path.exists(_CANONICAL):
+        return "none"
+    h = hashlib.sha256()
+    with open(_CANONICAL, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +142,14 @@ def _fmt_event(ev: dict) -> str:
 
 def _write_projection(path: str, header: str, events: list[dict]) -> int:
     """Write events to a projection file. Returns event count written."""
+    generated_at = datetime.datetime.now().isoformat(timespec="seconds")
+    canonical_hash = _canonical_file_hash()
     with open(path, "w", encoding="utf-8") as f:
+        f.write(
+            f"# projection_version={PROJECTION_VERSION}"
+            f" generated_at={generated_at}"
+            f" source_canonical_hash={canonical_hash}\n"
+        )
         f.write(f"# {header}\n")
         f.write(f"# Generated from canonical stream. Non-canonical — regenerable.\n")
         f.write(f"# event_count={len(events)}\n\n")
@@ -197,6 +211,29 @@ def generate_qa_projection(
     return _write_projection(path, "QA Projection  [domain=qa | domain=system]", events)
 
 
+_COGNITION_EVENT_TYPES = frozenset({
+    "thinking_recorded", "decision_graph_recorded",
+})
+
+
+def generate_cognition_projection(
+    run_id: Optional[str] = None,
+    output_path: Optional[str] = None,
+) -> int:
+    """Projection: cognitive memory events (thinking + decision_graph).
+
+    Filters by event_type directly — disposable debug slice of canonical stream.
+    Returns number of events written.
+    """
+    _ensure_dirs()
+    events = [
+        ev for ev in _load_events(run_id)
+        if ev.get("event_type") in _COGNITION_EVENT_TYPES
+    ]
+    path = output_path or os.path.join(_PROJ_DIR, "cognition.log")
+    return _write_projection(path, "Cognition Projection  [thinking | decision_graph]", events)
+
+
 # ---------------------------------------------------------------------------
 # F4 — Views (lineage_index + pretty)
 # ---------------------------------------------------------------------------
@@ -218,7 +255,14 @@ def generate_lineage_index(
     events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
 
     path = output_path or os.path.join(_VIEW_DIR, "lineage_index.md")
+    generated_at = datetime.datetime.now().isoformat(timespec="seconds")
+    canonical_hash = _canonical_file_hash()
     with open(path, "w", encoding="utf-8") as f:
+        f.write(
+            f"<!-- projection_version={PROJECTION_VERSION}"
+            f" generated_at={generated_at}"
+            f" source_canonical_hash={canonical_hash} -->\n\n"
+        )
         f.write("# Lineage Index\n\n")
         f.write("> Generated from canonical stream. Non-canonical — regenerable.\n")
         f.write(f"> event_count={len(events_sorted)}\n\n")
@@ -258,7 +302,14 @@ def generate_pretty_view(
     events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
 
     path = output_path or os.path.join(_VIEW_DIR, "pretty.log")
+    generated_at = datetime.datetime.now().isoformat(timespec="seconds")
+    canonical_hash = _canonical_file_hash()
     with open(path, "w", encoding="utf-8") as f:
+        f.write(
+            f"# projection_version={PROJECTION_VERSION}"
+            f" generated_at={generated_at}"
+            f" source_canonical_hash={canonical_hash}\n"
+        )
         f.write(f"# Pretty View — canonical stream export\n")
         f.write(f"# Non-canonical. Regenerable. event_count={len(events_sorted)}\n\n")
         for ev in events_sorted:
@@ -289,105 +340,6 @@ def generate_pretty_view(
 # Convenience runner
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# F8 — Deterministic reconstruction verification
-# ---------------------------------------------------------------------------
-
-def _projection_hash(events: list[dict]) -> str:
-    """Compute a deterministic SHA-256 hash of a sorted event list.
-
-    Sort key: (timestamp, event_id) — ensures stable ordering regardless of
-    insertion order. Same canonical input always produces the same hash.
-    """
-    stable = sorted(events, key=lambda e: (e.get("timestamp", ""), e.get("event_id", "")))
-    content = json.dumps(stable, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def verify_run_reconstruction(run_id: Optional[str] = None) -> dict:
-    """Verify that the canonical stream can be deterministically reconstructed.
-
-    Checks performed:
-      1. Schema validation — every event satisfies required fields
-      2. Orphan detection — parent_event_id references that do not exist
-      3. Run completeness — run_start and run_end events present (if run_id given)
-      4. Determinism hash — projection hash for each semantic slice
-
-    Args:
-        run_id: Verify only events for this run. None = full stream.
-
-    Returns:
-        {
-          "ok": bool,
-          "run_id": str | None,
-          "event_count": int,
-          "schema_errors": [str],
-          "orphaned_parents": [str],
-          "run_start_found": bool,
-          "run_end_found": bool,
-          "hashes": {"runtime": str, "decisions": str, "qa": str, "all": str},
-          "anomalies": [str],
-        }
-    """
-    events = _load_events(run_id)
-    event_ids = {ev.get("event_id") for ev in events}
-
-    schema_errors: list[str] = []
-    orphaned_parents: list[str] = []
-    anomalies: list[str] = []
-
-    for ev in events:
-        if not is_valid_event(ev):
-            schema_errors.append(
-                f"event_id={ev.get('event_id','?')} phase={ev.get('phase','?')} "
-                f"event_type={ev.get('event_type','?')}"
-            )
-        parent = ev.get("parent_event_id")
-        if parent and parent not in event_ids:
-            orphaned_parents.append(
-                f"event_id={ev.get('event_id','?')} -> parent={parent} (not found)"
-            )
-
-    run_start_found = any(
-        ev.get("event_type") == "run_start" for ev in events
-    )
-    run_end_found = any(
-        ev.get("event_type") in ("run_end", "run_complete") for ev in events
-    )
-
-    if run_id and not run_start_found:
-        anomalies.append(f"run_id={run_id}: run_start event not found in canonical stream")
-    if run_id and not run_end_found:
-        anomalies.append(f"run_id={run_id}: run_end event not found in canonical stream")
-    if schema_errors:
-        anomalies.append(f"{len(schema_errors)} event(s) failed schema validation")
-    if orphaned_parents:
-        anomalies.append(f"{len(orphaned_parents)} orphaned parent_event_id reference(s)")
-
-    runtime_events   = [ev for ev in events if ev.get("domain") == "workflow"]
-    decisions_events = [ev for ev in events if ev.get("domain") == "decision"]
-    qa_events        = [ev for ev in events if ev.get("domain") in ("qa", "system")]
-
-    hashes = {
-        "runtime":   _projection_hash(runtime_events),
-        "decisions": _projection_hash(decisions_events),
-        "qa":        _projection_hash(qa_events),
-        "all":       _projection_hash(events),
-    }
-
-    return {
-        "ok": len(anomalies) == 0,
-        "run_id": run_id,
-        "event_count": len(events),
-        "schema_errors": schema_errors,
-        "orphaned_parents": orphaned_parents,
-        "run_start_found": run_start_found,
-        "run_end_found": run_end_found,
-        "hashes": hashes,
-        "anomalies": anomalies,
-    }
-
-
 def generate_all_projections(run_id: Optional[str] = None) -> dict[str, int]:
     """Generate all projections and views from the canonical stream.
 
@@ -397,13 +349,14 @@ def generate_all_projections(run_id: Optional[str] = None) -> dict[str, int]:
 
     Returns:
         dict of name → event_count written.
-          projections: runtime, decisions, qa
+          projections: runtime, decisions, qa, cognition
           views:       lineage_index, pretty
     """
     return {
         "runtime":       generate_runtime_projection(run_id),
         "decisions":     generate_decisions_projection(run_id),
         "qa":            generate_qa_projection(run_id),
+        "cognition":     generate_cognition_projection(run_id),
         "lineage_index": generate_lineage_index(run_id),
         "pretty":        generate_pretty_view(run_id),
     }

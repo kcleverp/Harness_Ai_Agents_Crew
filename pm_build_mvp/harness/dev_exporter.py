@@ -2,9 +2,7 @@ import os
 import shutil
 import datetime
 
-WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../workspace"))
-CURRENT_DIR = os.path.join(WORKSPACE_DIR, "current")
-ARCHIVE_DIR = os.path.join(WORKSPACE_DIR, "archive")
+from harness.paths import WORKSPACE_DIR, CURRENT_DIR, ARCHIVE_DIR
 
 def get_next_run_id() -> int:
     if not os.path.exists(ARCHIVE_DIR):

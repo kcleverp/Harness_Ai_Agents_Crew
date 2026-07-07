@@ -18,9 +18,11 @@ import os
 
 from harness.safe_file_tools import read_workspace_file, WORKSPACE_DIR
 from harness.prompt_loader import load_prompt
+from harness.paths import TEMPLATES_DIR
 
 _KERNEL_PATH = "founder_kernel.json"
 _KERNEL_ABS_PATH = os.path.join(WORKSPACE_DIR, _KERNEL_PATH)
+_STARTER_PATH = os.path.join(TEMPLATES_DIR, "founder_kernel.sample.json")
 
 _KERNEL_TEMPLATE: dict = {
     "core_thesis": [],
@@ -29,6 +31,18 @@ _KERNEL_TEMPLATE: dict = {
     "founder_convictions": [],
     "kernel_hash": "",
 }
+
+
+def _load_starter_kernel() -> dict:
+    """Starter draft aligned with templates/raw_ideas.sample.md (To-Do MVP)."""
+    try:
+        with open(_STARTER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        starter = {k: data.get(k, v) for k, v in _KERNEL_TEMPLATE.items() if k != "kernel_hash"}
+        starter["kernel_hash"] = ""
+        return starter
+    except (OSError, json.JSONDecodeError):
+        return dict(_KERNEL_TEMPLATE)
 
 _GUARD_HEADER = load_prompt("kernel_guard_header")
 _GUARD_FOOTER = load_prompt("kernel_guard_footer")
@@ -58,14 +72,15 @@ def load_founder_kernel() -> dict:
     raw = read_workspace_file(_KERNEL_PATH)
 
     if raw.startswith("Error:"):
-        # File does not exist — write template and return it
-        _write_kernel(_KERNEL_TEMPLATE)
+        # First run — seed starter draft so founders can test Intent Review immediately.
+        starter = _load_starter_kernel()
+        _write_kernel(starter)
         from harness.audit_hooks import log_pm_audit
         log_pm_audit(
-            "KernelGuard | Status=TEMPLATE_CREATED | "
-            "Message=founder_kernel.json did not exist; blank template written"
+            "KernelGuard | Status=STARTER_CREATED | "
+            "Message=founder_kernel.json did not exist; starter draft written from template"
         )
-        return dict(_KERNEL_TEMPLATE)
+        return starter
 
     try:
         data = json.loads(raw)

@@ -1,0 +1,11 @@
+{
+  "name": "pm-build-mvp",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:setup": "pip install -r requirements.txt && npm install --prefix frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
